@@ -1,0 +1,30 @@
+packages/blitz-dom/src/paint_rules.rs
+  s_faae8d19c8b66a::t_7e1bb38731e4ee 1-27,29,31,36-225,227-428
+  s_faae8d19c8b66a::t_997f3785e60a45 28
+  s_faae8d19c8b66a::t_664e4a16e44608 30,32-35
+  s_faae8d19c8b66a::t_1b778238048f2d 226
+packages/blitz-dom/Cargo.toml
+  s_faae8d19c8b66a::t_dfa8c18c0f67db 24-25,81
+packages/blitz-dom/src/lib.rs
+  s_faae8d19c8b66a::t_dfa8c18c0f67db 55-56
+packages/blitz-dom/src/document.rs
+  s_faae8d19c8b66a::t_dfa8c18c0f67db 415-418,594-596,2248-2252,2254
+Cargo.lock
+  s_faae8d19c8b66a::t_0baed8aecee08b 945
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0155bda9e6c3ae676db7067f7bf69f9b6f40e989",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
