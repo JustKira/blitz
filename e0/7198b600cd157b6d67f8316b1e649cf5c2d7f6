@@ -1,0 +1,33 @@
+packages/blitz-paint/src/render.rs
+  s_faae8d19c8b66a::t_a049b96a36bc1a 908-911
+  s_faae8d19c8b66a::t_f23d92f52c35d2 189-192,533-537,599-600,605-606,660-661,664-667,672-673,677-678,720-722,769-806,887-907,912-915,917
+  s_faae8d19c8b66a::t_ead89d5f5baa18 28-29
+  s_faae8d19c8b66a::t_5a5491f2102789 916,918
+tests/blitz-tests/Cargo.toml
+  s_faae8d19c8b66a::t_ead89d5f5baa18 17,20
+packages/blitz-shell/Cargo.toml
+  s_faae8d19c8b66a::t_dfa8c18c0f67db 33
+packages/blitz-paint/Cargo.toml
+  s_faae8d19c8b66a::t_dfa8c18c0f67db 18
+tests/blitz-tests/tests/all.rs
+  s_faae8d19c8b66a::t_77f7af4eec795c 55
+tests/blitz-tests/tests/paint_rules.rs
+  s_faae8d19c8b66a::t_ead89d5f5baa18 1-4,7-197,199-224
+  s_faae8d19c8b66a::t_664e4a16e44608 5-6,198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e07198b600cd157b6d67f8316b1e649cf5c2d7f6",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
