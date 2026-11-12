@@ -1,0 +1,26 @@
+packages/blitz-dom/src/paint_rules.rs
+  s_faae8d19c8b66a::t_939c9ca756f084 17,21,241-252,297,312-313,319-320,322-326,330-331,337-345,347-350,409-411,418-420,429-434
+  s_faae8d19c8b66a::t_8474d32b178b70 310,321,328,346
+  s_faae8d19c8b66a::t_17aeb5413d341d 435
+packages/blitz-paint/src/render.rs
+  s_faae8d19c8b66a::t_939c9ca756f084 776,789-801
+  s_faae8d19c8b66a::t_8474d32b178b70 805
+tests/blitz-tests/tests/paint_rules.rs
+  s_faae8d19c8b66a::t_939c9ca756f084 267-304
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f12a2566268e474df500785f37dfe68bc4f05c78",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
