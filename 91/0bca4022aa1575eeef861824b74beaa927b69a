@@ -1,0 +1,22 @@
+packages/blitz-dom/src/paint_rules.rs
+  s_faae8d19c8b66a::t_c183bcd03667a2 323-330
+tests/blitz-tests/tests/paint_rules.rs
+  s_faae8d19c8b66a::t_4c7c208fa61bce 251-261,263-266
+  s_faae8d19c8b66a::t_c183bcd03667a2 262
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "910bca4022aa1575eeef861824b74beaa927b69a",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
