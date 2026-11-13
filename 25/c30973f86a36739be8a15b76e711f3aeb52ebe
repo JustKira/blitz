@@ -1,0 +1,25 @@
+packages/blitz-dom/src/paint_hook.rs
+  s_faae8d19c8b66a::t_2b4954de3014d3 75-81
+  s_faae8d19c8b66a::t_4e50fd9cbd502a 400,402-406,411-414,417-420,529-571,616-628
+  s_faae8d19c8b66a::t_a1d2d25e670878 29-30,220,289
+  s_faae8d19c8b66a::t_b7ab9286c9e48d 629
+tests/blitz-tests/tests/paint_hook.rs
+  s_faae8d19c8b66a::t_e14d58ed4e8885 7,498-538
+  s_faae8d19c8b66a::t_92882a514e9b53 539
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "25c30973f86a36739be8a15b76e711f3aeb52ebe",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
