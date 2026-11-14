@@ -1,0 +1,21 @@
+packages/blitz-shell/src/window.rs
+  s_faae8d19c8b66a::t_3b805611821275 9,938
+packages/blitz-shell/src/lib.rs
+  s_faae8d19c8b66a::t_3b805611821275 24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "70440bb2b778ad39179dd332baebaf502224fcd7",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
