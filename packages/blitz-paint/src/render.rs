@@ -184,6 +184,11 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     /// This assumes styles are resolved and layout is complete.
     /// Make sure you do those before trying to render
     pub fn paint_scene(&self, scene: &mut impl PaintScene) {
+        self.paint_scene_with(scene, &DefaultPainter);
+    }
+
+    /// Like [`paint_scene`](Self::paint_scene), but every element is painted by `painter`.
+    pub fn paint_scene_with<S: PaintScene>(&self, scene: &mut S, painter: &dyn ElementPainter<S>) {
         if self.dom.has_pending_critical_resources() {
             return;
         }
@@ -253,6 +258,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 y: self.initial_y - (viewport_scroll.y * self.scale),
             }),
             viewport_clip_rect,
+            painter,
         );
 
         // Render debug overlay
@@ -405,42 +411,54 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     ///
     /// Approaching rendering this way guarantees we have all the styles we need when rendering text with not having
     /// to traverse back to the parent for its styles, or needing to pass down styles
-    fn render_element(
+    fn render_element<S: PaintScene>(
         &self,
-        scene: &mut impl PaintScene,
+        scene: &mut S,
         node_id: NodeId,
         parent_style_transform: Affine,
         clip_rect: Rect,
+        painter: &dyn ElementPainter<S>,
     ) {
+        if let Some(mut el) =
+            self.begin_element(node_id, parent_style_transform, clip_rect, painter)
+        {
+            painter.paint_element(&mut el, scene);
+        }
+    }
+
+    /// Work out everything that painting `node_id` needs. `None` if the element is not
+    /// painted at all: hidden, fully transparent, or outside the clip rectangle.
+    fn begin_element<'s, S: PaintScene>(
+        &'s self,
+        node_id: NodeId,
+        parent_style_transform: Affine,
+        clip_rect: Rect,
+        painter: &'s dyn ElementPainter<S>,
+    ) -> Option<ElementPaint<'s, S>> {
         let node = &self.dom.as_ref().tree()[node_id];
 
         // Early return if the element is hidden
         if matches!(node.taffy_display(), taffy::Display::None) {
-            return;
+            return None;
         }
 
         // Only draw elements with a style
-        let Some(styles) = node.primary_styles() else {
-            return;
-        };
+        let styles = node.primary_styles()?;
 
         // Hide inputs with type=hidden
         // Implemented here rather than using the style engine for performance reasons
         if node.local_name() == "input" && node.attr(local_name!("type")) == Some("hidden") {
-            return;
+            return None;
         }
 
         // Hide elements with a visibility style other than visible
         if styles.get_inherited_box().visibility != StyloVisibility::Visible {
-            return;
+            return None;
         }
 
-        let effects = styles.get_effects();
-        let opacity = effects.opacity;
-        if opacity == 0.0 {
-            return;
+        if styles.get_effects().opacity == 0.0 {
+            return None;
         }
-        let has_opacity = opacity < 1.0;
 
         let should_clip = self.should_clip_node(node, &styles);
         let is_text_input = node
@@ -487,7 +505,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             || screen_bbox.y1 < clip_rect.y0
             || screen_bbox.y0 > clip_rect.y1
         {
-            return;
+            return None;
         }
 
         // Cull elements whose transformed geometry is not representable in f32 (e.g.
@@ -504,7 +522,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             .iter()
             .any(|c| c.abs() > f32_max)
         {
-            return;
+            return None;
         }
 
         // Optimise zero-area (/very small area) clips by not rendering at all
@@ -512,7 +530,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         let overflow_area =
             node.scrollable_overflow().width() * node.scrollable_overflow().height();
         if should_clip && clip_area < 0.01 && overflow_area < 0.01 {
-            return;
+            return None;
         }
 
         #[cfg(feature = "custom-widget")]
@@ -522,7 +540,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         // Apply CSS transform property (where transforms are 2d)
 
-        let mut cx = self.element_cx(node, *node.final_layout(), transform, custom_widget_scene);
+        let cx = self.element_cx(node, *node.final_layout(), transform, custom_widget_scene);
 
         // If this element clips its overflow it establishes a scrollport: narrow the clip
         // rectangle passed to descendants to the visible (clipped) region so that content
@@ -539,193 +557,45 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             clip_rect
         };
 
-        // Compute clip-path (if any) and wrap all rendering in a clip layer
-        let clip_path_shape = cx.clip_path_shape();
-        let has_clip_path = clip_path_shape.is_some();
-        let default_clip = cx.frame.border_box_path();
-        let mut clip_path_for_layer = clip_path_shape.unwrap_or(default_clip);
-        clip_path_for_layer.apply_affine(Affine::scale(self.scale));
+        // Compute clip-path (if any). All rendering inside the box layers is wrapped in it.
+        let clip_path = cx.clip_path_shape().map(|mut path| {
+            path.apply_affine(Affine::scale(self.scale));
+            path
+        });
 
         // CSS 2 `clip` property (absolutely positioned elements only). Applies to the whole of
         // the element's rendering (including outlines and shadows), so it is the outermost layer.
         let css_clip_rect = cx.css_clip_rect();
         if css_clip_rect.is_some_and(|rect| rect.is_zero_area()) {
-            return;
-        }
-        let css_clip_layer_pushed = self.layer_manager.maybe_push_layer(
-            scene,
-            css_clip_rect.is_some(),
-            BlendMode::default(),
-            1.0,
-            cx.transform,
-            &css_clip_rect.unwrap_or(Rect::ZERO),
-            None,
-            None,
-        );
-
-        // Use the viewport in scene coordinates so outlines, shadows and overflowing
-        // descendants are not clipped to the element's border box.
-        let blend = convert_blend_mode(effects.mix_blend_mode);
-        let isolate = styles.get_box().isolation == Isolation::Isolate;
-        let blend_layer_pushed = self.layer_manager.maybe_push_layer(
-            scene,
-            isolate || blend != BlendMode::default(),
-            blend,
-            if isolate { 1.0 - f32::EPSILON } else { 1.0 },
-            Affine::IDENTITY,
-            &Rect::new(
-                self.initial_x,
-                self.initial_y,
-                self.initial_x + self.width as f64,
-                self.initial_y + self.height as f64,
-            ),
-            None,
-            None,
-        );
-
-        let paints_own_box = !node.is_inline_with_only_block_children();
-
-        cx.draw_outline(scene);
-        if paints_own_box {
-            cx.draw_outset_box_shadow(scene);
+            return None;
         }
 
-        // clip-path clip ayer
-        self.layer_manager.maybe_with_layer(
-            scene,
-            has_clip_path,
-            BlendMode::default(),
-            1.0,
-            cx.transform,
-            &clip_path_for_layer,
-            None,
-            None,
-            |scene| {
-                // If the element has a CSS `mask`, then push an isolation layer for the
-                // masked content. The mask is applied when the layer is popped below.
-                let mask_layer_pushed = cx.maybe_push_css_mask_layer(scene);
-                // `cx.transform` is mutated to apply scroll offsets while drawing content.
-                // Save it so that the mask can be drawn untransformed by scroll offsets.
-                let unscrolled_transform = cx.transform;
-
-                let filter = convert_filters(&effects.filter.0).map(Arc::new);
-                let backdrop_filter = convert_filters(&effects.backdrop_filter.0).map(Arc::new);
-
-                // Adjust effect layer clip by filter expansion area
-                //
-                // Returns a rectangle centered at the origin representing how much the filter
-                // expands the processing region in each direction. The rect coordinates are:
-                // - x0: negative left expansion
-                // - y0: negative top expansion
-                // - x1: positive right expansion
-                // - y1: positive bottom expansion
-                let filter_expansion_area = filter
-                    .as_ref()
-                    .map(|f| f.expansion_rect())
-                    .unwrap_or(Rect::ZERO);
-
-                let mut effect_layer_clip = cx.frame.border_box_path().bounding_box();
-                effect_layer_clip.x0 += filter_expansion_area.x0;
-                effect_layer_clip.y0 += filter_expansion_area.y0;
-                effect_layer_clip.x1 += filter_expansion_area.x1;
-                effect_layer_clip.y1 += filter_expansion_area.y1;
-
-                // Opacity/Filter layer if box has opacity or a filter.
-                // Clipped to border-box as it needs to include the background and borders.
-                self.layer_manager.maybe_with_layer(
-                    scene,
-                    has_opacity || filter.is_some() || backdrop_filter.is_some(),
-                    BlendMode::default(),
-                    opacity,
-                    cx.transform,
-                    &effect_layer_clip,
-                    filter,
-                    backdrop_filter,
-                    |scene| {
-                        if paints_own_box {
-                            cx.draw_background(scene);
-                            cx.draw_inset_box_shadow(scene);
-                        }
-                        cx.draw_table_row_backgrounds(scene);
-                        cx.draw_table_borders(scene);
-                        if paints_own_box {
-                            cx.draw_border(scene);
-                        }
-                        cx.stroke_devtools(scene);
-
-                        // TODO: allow layers with opacity to be unclipped (overflow: visible)
-                        let clip = if is_text_input {
-                            &cx.frame.text_input_clip_path()
-                        } else {
-                            &cx.frame.padding_box_path()
-                        };
-
-                        // Clip layer if box requires clipping. Opacity set to 1.0
-                        self.layer_manager.maybe_with_layer(
-                            scene,
-                            should_clip,
-                            BlendMode::default(),
-                            1.0, // opacity
-                            cx.transform,
-                            clip,
-                            None,
-                            None,
-                            |scene| {
-                                // Now that background has been drawn, offset pos and cx in order to draw our contents scrolled
-                                let content_position = Point {
-                                    x: content_position.x - node.scroll_offset().x,
-                                    y: content_position.y - node.scroll_offset().y,
-                                };
-
-                                cx.transform = self.scrolled_transform(node, cx.transform);
-                                cx.draw_image(scene);
-                                #[cfg(feature = "svg")]
-                                cx.draw_svg(scene);
-                                #[cfg(feature = "custom-widget")]
-                                cx.draw_custom_widget(scene);
-                                cx.draw_sub_document(scene);
-                                cx.draw_input(scene);
-                                cx.draw_text_input_text(scene, content_position);
-                                cx.draw_inline_layout(scene, content_position);
-                                cx.draw_marker(scene, content_position);
-                                cx.draw_children(scene, cx.transform, child_clip_rect);
-                            },
-                        );
-
-                        // Overlay scrollbars, drawn unscrolled above the
-                        // clipped content.
-                        #[cfg(feature = "scrollbars")]
-                        {
-                            cx.transform = unscrolled_transform;
-                            cx.draw_scrollbars(scene);
-                        }
-                    },
-                );
-
-                // Apply the CSS `mask` (if any) to the content drawn above
-                cx.transform = unscrolled_transform;
-                cx.maybe_pop_css_mask_layer(scene, mask_layer_pushed);
-            },
-        );
-
-        self.layer_manager
-            .maybe_pop_layer(scene, blend_layer_pushed);
-        self.layer_manager
-            .maybe_pop_layer(scene, css_clip_layer_pushed);
+        Some(ElementPaint {
+            paints_own_box: !node.is_inline_with_only_block_children(),
+            cx,
+            painter,
+            should_clip,
+            is_text_input,
+            content_position,
+            child_clip_rect,
+            clip_path,
+            css_clip_rect,
+        })
     }
 
-    fn render_node(
+    fn render_node<S: PaintScene>(
         &self,
-        scene: &mut impl PaintScene,
+        scene: &mut S,
         node_id: NodeId,
         parent_style_transform: Affine,
         clip_rect: Rect,
+        painter: &dyn ElementPainter<S>,
     ) {
         let node = &self.dom.as_ref().tree()[node_id];
 
         match &node.data {
             NodeData::Element(_) | NodeData::AnonymousBlock(_) => {
-                self.render_element(scene, node_id, parent_style_transform, clip_rect)
+                self.render_element(scene, node_id, parent_style_transform, clip_rect, painter)
             }
             NodeData::Text(TextNodeData { .. }) => {
                 // Text nodes should never be rendered directly
@@ -815,6 +685,351 @@ fn to_peniko_image(image: &RasterImageData, quality: peniko::ImageQuality) -> pe
             quality,
             alpha: 1.0,
         },
+    }
+}
+
+/// Paints one element. The painter calls it for every element it reaches, in paint order.
+///
+/// The default, [`DefaultPainter`], calls [`ElementPaint::paint`]. An implementation can paint
+/// the element from the same pieces in its own way, leave pieces out, draw its own in between,
+/// or wrap them in layers of its own. Children are painted by this same painter, when the
+/// implementation calls [`ElementPaint::children`].
+///
+/// Implemented for closures: `|el: &mut ElementPaint<'_, S>, scene: &mut S| el.paint(scene)`.
+pub trait ElementPainter<S: PaintScene> {
+    fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S);
+}
+
+impl<S: PaintScene, F: Fn(&mut ElementPaint<'_, S>, &mut S)> ElementPainter<S> for F {
+    fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+        self(el, scene)
+    }
+}
+
+/// Paints every element the way Blitz does.
+pub struct DefaultPainter;
+
+impl<S: PaintScene> ElementPainter<S> for DefaultPainter {
+    fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+        el.paint(scene)
+    }
+}
+
+/// One element that is being painted: where it is, and the pieces it is painted from.
+///
+/// [`paint`](Self::paint) is the whole element as Blitz paints it. It is written with the
+/// other methods of this type, and reads as the order of painting:
+///
+/// ```ignore
+/// el.with_box_layers(scene, |el, scene| {         // `clip`, `mix-blend-mode`, `isolation`
+///     el.outline(scene);
+///     el.outer_shadow(scene);
+///     el.with_effect_layers(scene, |el, scene| {  // `clip-path`, `mask`, `opacity`, `filter`
+///         el.background(scene);
+///         el.inset_shadow(scene);
+///         el.table_parts(scene);
+///         el.border(scene);
+///         el.with_content_clip(scene, |el, scene| {  // `overflow` clip, scroll offset
+///             el.own_content(scene);              // image, text, form control, marker
+///             el.children(scene);
+///         });
+///         el.scrollbars(scene);
+///     });
+/// });
+/// ```
+///
+/// Geometry ([`css_box`](Self::css_box)) is in physical pixels, measured from the top-left
+/// corner of the element's border box. [`transform`](Self::transform) places that space in
+/// the scene.
+pub struct ElementPaint<'p, S: PaintScene> {
+    cx: ElementCx<'p, 'p>,
+    painter: &'p dyn ElementPainter<S>,
+    paints_own_box: bool,
+    should_clip: bool,
+    is_text_input: bool,
+    content_position: Point,
+    child_clip_rect: Rect,
+    clip_path: Option<kurbo::BezPath>,
+    css_clip_rect: Option<Rect>,
+}
+
+impl<'p, S: PaintScene> ElementPaint<'p, S> {
+    /// The element's node: its id, attributes, computed style, parent and children.
+    pub fn node(&self) -> &'p Node {
+        self.cx.node
+    }
+
+    /// The document being painted.
+    pub fn document(&self) -> &'p BaseDocument {
+        self.cx.context.dom
+    }
+
+    /// The element's border, padding and content boxes with their corner radii.
+    pub fn css_box(&self) -> &CssBox {
+        &self.cx.frame
+    }
+
+    /// Maps the element's space to the scene. Inside
+    /// [`with_content_clip`](Self::with_content_clip) it includes the element's scroll offset.
+    pub fn transform(&self) -> Affine {
+        self.cx.transform
+    }
+
+    /// Physical pixels per CSS pixel.
+    pub fn scale(&self) -> f64 {
+        self.cx.scale
+    }
+
+    /// Paint the whole element as Blitz does.
+    pub fn paint(&mut self, scene: &mut S) {
+        self.with_box_layers(scene, |el, scene| {
+            el.outline(scene);
+            el.outer_shadow(scene);
+            el.with_effect_layers(scene, |el, scene| {
+                el.background(scene);
+                el.inset_shadow(scene);
+                el.table_parts(scene);
+                el.border(scene);
+                el.with_content_clip(scene, |el, scene| {
+                    el.own_content(scene);
+                    el.children(scene);
+                });
+                el.scrollbars(scene);
+            });
+        });
+    }
+
+    /// The outermost layers of the element: the CSS 2 `clip` property, and `mix-blend-mode`
+    /// or `isolation`. Everything the element paints goes inside.
+    pub fn with_box_layers(&mut self, scene: &mut S, paint: impl FnOnce(&mut Self, &mut S)) {
+        let context = self.cx.context;
+        let css_clip_layer_pushed = context.layer_manager.maybe_push_layer(
+            scene,
+            self.css_clip_rect.is_some(),
+            BlendMode::default(),
+            1.0,
+            self.cx.transform,
+            &self.css_clip_rect.unwrap_or(Rect::ZERO),
+            None,
+            None,
+        );
+
+        // Use the viewport in scene coordinates so outlines, shadows and overflowing
+        // descendants are not clipped to the element's border box.
+        let blend = convert_blend_mode(self.cx.style.get_effects().mix_blend_mode);
+        let isolate = self.cx.style.get_box().isolation == Isolation::Isolate;
+        let blend_layer_pushed = context.layer_manager.maybe_push_layer(
+            scene,
+            isolate || blend != BlendMode::default(),
+            blend,
+            if isolate { 1.0 - f32::EPSILON } else { 1.0 },
+            Affine::IDENTITY,
+            &Rect::new(
+                context.initial_x,
+                context.initial_y,
+                context.initial_x + context.width as f64,
+                context.initial_y + context.height as f64,
+            ),
+            None,
+            None,
+        );
+
+        paint(self, scene);
+
+        context
+            .layer_manager
+            .maybe_pop_layer(scene, blend_layer_pushed);
+        context
+            .layer_manager
+            .maybe_pop_layer(scene, css_clip_layer_pushed);
+    }
+
+    /// The outline.
+    pub fn outline(&self, scene: &mut S) {
+        self.cx.draw_outline(scene);
+    }
+
+    /// The outer `box-shadow`.
+    pub fn outer_shadow(&self, scene: &mut S) {
+        if self.paints_own_box {
+            self.cx.draw_outset_box_shadow(scene);
+        }
+    }
+
+    /// The layers for `clip-path`, `mask`, and `opacity`, `filter` or `backdrop-filter`. The
+    /// background, border and content go inside; the outline and outer shadow do not.
+    pub fn with_effect_layers(&mut self, scene: &mut S, paint: impl FnOnce(&mut Self, &mut S)) {
+        let context = self.cx.context;
+        let clip_path_layer_pushed = match &self.clip_path {
+            Some(clip_path) => context.layer_manager.maybe_push_layer(
+                scene,
+                true,
+                BlendMode::default(),
+                1.0,
+                self.cx.transform,
+                clip_path,
+                None,
+                None,
+            ),
+            None => false,
+        };
+
+        // If the element has a CSS `mask`, then push an isolation layer for the
+        // masked content. The mask is applied when the layer is popped below.
+        let mask_layer_pushed = self.cx.maybe_push_css_mask_layer(scene);
+
+        let (opacity, filter, backdrop_filter) = {
+            let effects = self.cx.style.get_effects();
+            (
+                effects.opacity,
+                convert_filters(&effects.filter.0).map(Arc::new),
+                convert_filters(&effects.backdrop_filter.0).map(Arc::new),
+            )
+        };
+
+        // Adjust effect layer clip by filter expansion area
+        //
+        // Returns a rectangle centered at the origin representing how much the filter
+        // expands the processing region in each direction. The rect coordinates are:
+        // - x0: negative left expansion
+        // - y0: negative top expansion
+        // - x1: positive right expansion
+        // - y1: positive bottom expansion
+        let filter_expansion_area = filter
+            .as_ref()
+            .map(|f| f.expansion_rect())
+            .unwrap_or(Rect::ZERO);
+
+        let mut effect_layer_clip = self.cx.frame.border_box_path().bounding_box();
+        effect_layer_clip.x0 += filter_expansion_area.x0;
+        effect_layer_clip.y0 += filter_expansion_area.y0;
+        effect_layer_clip.x1 += filter_expansion_area.x1;
+        effect_layer_clip.y1 += filter_expansion_area.y1;
+
+        // Opacity/Filter layer if box has opacity or a filter.
+        // Clipped to border-box as it needs to include the background and borders.
+        let effect_layer_pushed = context.layer_manager.maybe_push_layer(
+            scene,
+            opacity < 1.0 || filter.is_some() || backdrop_filter.is_some(),
+            BlendMode::default(),
+            opacity,
+            self.cx.transform,
+            &effect_layer_clip,
+            filter,
+            backdrop_filter,
+        );
+
+        paint(self, scene);
+
+        context
+            .layer_manager
+            .maybe_pop_layer(scene, effect_layer_pushed);
+
+        // Apply the CSS `mask` (if any) to the content drawn above
+        self.cx.maybe_pop_css_mask_layer(scene, mask_layer_pushed);
+        context
+            .layer_manager
+            .maybe_pop_layer(scene, clip_path_layer_pushed);
+    }
+
+    /// The background.
+    pub fn background(&self, scene: &mut S) {
+        if self.paints_own_box {
+            self.cx.draw_background(scene);
+        }
+    }
+
+    /// The inset `box-shadow`.
+    pub fn inset_shadow(&self, scene: &mut S) {
+        if self.paints_own_box {
+            self.cx.draw_inset_box_shadow(scene);
+        }
+    }
+
+    /// For a table: the backgrounds of its rows and its collapsed borders.
+    pub fn table_parts(&self, scene: &mut S) {
+        self.cx.draw_table_row_backgrounds(scene);
+        self.cx.draw_table_borders(scene);
+    }
+
+    /// The border.
+    pub fn border(&self, scene: &mut S) {
+        if self.paints_own_box {
+            self.cx.draw_border(scene);
+        }
+        self.cx.stroke_devtools(scene);
+    }
+
+    /// The clip for `overflow`, and the element's scroll offset. The element's own content
+    /// and its children go inside.
+    pub fn with_content_clip(&mut self, scene: &mut S, paint: impl FnOnce(&mut Self, &mut S)) {
+        let context = self.cx.context;
+
+        // TODO: allow layers with opacity to be unclipped (overflow: visible)
+        let clip = if self.is_text_input {
+            self.cx.frame.text_input_clip_path()
+        } else {
+            self.cx.frame.padding_box_path()
+        };
+
+        // Clip layer if box requires clipping. Opacity set to 1.0
+        let clip_layer_pushed = context.layer_manager.maybe_push_layer(
+            scene,
+            self.should_clip,
+            BlendMode::default(),
+            1.0, // opacity
+            self.cx.transform,
+            &clip,
+            None,
+            None,
+        );
+
+        // The content is drawn scrolled. Everything else is not.
+        let unscrolled_transform = self.cx.transform;
+        self.cx.transform = context.scrolled_transform(self.cx.node, self.cx.transform);
+        paint(self, scene);
+        self.cx.transform = unscrolled_transform;
+
+        context
+            .layer_manager
+            .maybe_pop_layer(scene, clip_layer_pushed);
+    }
+
+    /// What the element itself shows: an image, SVG, custom widget, sub-document, form
+    /// control, text and list marker. Call it inside
+    /// [`with_content_clip`](Self::with_content_clip).
+    pub fn own_content(&self, scene: &mut S) {
+        let cx = &self.cx;
+        let content_position = Point {
+            x: self.content_position.x - cx.node.scroll_offset().x,
+            y: self.content_position.y - cx.node.scroll_offset().y,
+        };
+
+        cx.draw_image(scene);
+        #[cfg(feature = "svg")]
+        cx.draw_svg(scene);
+        #[cfg(feature = "custom-widget")]
+        cx.draw_custom_widget(scene);
+        cx.draw_sub_document(scene);
+        cx.draw_input(scene);
+        cx.draw_text_input_text(scene, content_position);
+        cx.draw_inline_layout(scene, content_position);
+        cx.draw_marker(scene, content_position);
+    }
+
+    /// The element's children, in paint order, each painted by the same [`ElementPainter`].
+    /// Call it inside [`with_content_clip`](Self::with_content_clip).
+    pub fn children(&self, scene: &mut S) {
+        self.cx
+            .draw_children(scene, self.cx.transform, self.child_clip_rect, self.painter);
+    }
+
+    /// Overlay scrollbars, drawn unscrolled above the clipped content.
+    pub fn scrollbars(&self, scene: &mut S) {
+        #[cfg(feature = "scrollbars")]
+        self.cx.draw_scrollbars(scene);
+        #[cfg(not(feature = "scrollbars"))]
+        let _ = scene;
     }
 }
 
@@ -1152,11 +1367,12 @@ impl ElementCx<'_, '_> {
         }
     }
 
-    fn draw_children(
+    fn draw_children<S: PaintScene>(
         &self,
-        scene: &mut impl PaintScene,
+        scene: &mut S,
         parent_style_transform: Affine,
         clip_rect: Rect,
+        painter: &dyn ElementPainter<S>,
     ) {
         // Negative z_index hoisted nodes
 
@@ -1172,6 +1388,7 @@ impl ElementCx<'_, '_> {
                     hoisted_child.node_id,
                     parent_style_transform.pre_translate(pos),
                     clip_rect,
+                    painter,
                 );
             }
         }
@@ -1200,7 +1417,7 @@ impl ElementCx<'_, '_> {
                 } else {
                     parent_style_transform
                 };
-                self.render_node(scene, *child_id, child_transform, clip_rect);
+                self.render_node(scene, *child_id, child_transform, clip_rect, painter);
             }
         }
 
@@ -1217,6 +1434,7 @@ impl ElementCx<'_, '_> {
                     hoisted_child.node_id,
                     parent_style_transform.pre_translate(pos),
                     clip_rect,
+                    painter,
                 );
             }
         }

@@ -20,6 +20,9 @@ use anyrender::{PaintScene, Scene};
 use blitz_dom::{BaseDocument, NodeId, util::Color};
 use render::BlitzDomPainter;
 
+pub use kurbo_css::{CssBox, NonUniformRoundedRectRadii};
+pub use render::{DefaultPainter, ElementPaint, ElementPainter};
+
 const FONT_EMBOLDEN_ENABLED: bool = cfg!(any(
     feature = "font-embolden",
     all(feature = "apple-font-embolden", target_os = "macos"),
@@ -50,6 +53,36 @@ pub fn paint_scene(
     x_offset: u32,
     y_offset: u32,
 ) {
+    paint_scene_with(
+        scene,
+        doc,
+        scale,
+        width,
+        height,
+        x_offset,
+        y_offset,
+        &DefaultPainter,
+    );
+}
+
+/// Like [`paint_scene`], but every element is painted by `painter`.
+///
+/// Blitz still walks the document in paint order, skips what is hidden or out of view, and
+/// works out where each element lands. For each element it reaches it calls `painter`, which
+/// paints the element from the pieces of [`ElementPaint`], Blitz's own or its own.
+///
+/// Sub-documents (iframes) are painted the default way.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_scene_with<S: PaintScene>(
+    scene: &mut S,
+    doc: &mut BaseDocument,
+    scale: f64,
+    width: u32,
+    height: u32,
+    x_offset: u32,
+    y_offset: u32,
+    painter: &dyn ElementPainter<S>,
+) {
     // Run `.paint()` on every custom widget in the document (and all subdocuments) ahead of time.
     // This helps us avoid borrow-checker issues as we recurse down the tree (`.paint()` require `&mut self`).
     //
@@ -68,7 +101,7 @@ pub fn paint_scene(
         y_offset as f64,
         &custom_widget_scenes,
     );
-    generator.paint_scene(scene);
+    generator.paint_scene_with(scene, painter);
 
     // println!(
     //     "Rendered using {} clips (depth: {}) (wanted: {})",
