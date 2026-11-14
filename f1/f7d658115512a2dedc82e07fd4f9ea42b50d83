@@ -1,0 +1,22 @@
+packages/blitz-shell/src/lib.rs
+  s_faae8d19c8b66a::t_b63222580dad40 24
+packages/blitz-shell/src/window.rs
+  s_faae8d19c8b66a::t_b63222580dad40 48-50,56,74,86-94,104-109,253,396-398,483-485,960-963
+  s_faae8d19c8b66a::t_397c7085dc6d52 9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f1f7d658115512a2dedc82e07fd4f9ea42b50d83",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
