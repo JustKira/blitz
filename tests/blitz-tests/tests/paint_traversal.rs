@@ -4,7 +4,9 @@ use anyrender::{NullScenePainter, PaintScene, render_to_buffer};
 use anyrender_vello_cpu::VelloCpuImageRenderer;
 use blitz_dom::{BaseDocument, DocumentConfig, local_name};
 use blitz_html::{HtmlDocument, HtmlProvider};
-use blitz_paint::{DefaultPainter, ElementPaint, ElementPainter, paint_scene, paint_scene_with};
+use blitz_paint::{
+    DefaultPainter, ElementPaint, ElementPainter, Piece, paint_scene, paint_scene_with,
+};
 use blitz_traits::shell::{ColorScheme, Viewport};
 use kurbo::{Circle, Point, Rect};
 use peniko::{Color, Fill};
@@ -137,6 +139,79 @@ fn one_piece_can_be_replaced() {
     assert_eq!(pixel(&picture, (5, 50)), GREEN, "Blitz's border, over it");
     assert_eq!(pixel(&picture, (20, 20)), [0, 0, 0], "the child");
     assert_eq!(pixel(&picture, (150, 150)), WHITE, "other elements");
+}
+
+/// The same replacement without writing the order out: Blitz's sequence and layers, with a say
+/// in each piece. The pieces arrive in Blitz's order.
+#[test]
+fn one_piece_can_be_replaced_in_the_default_sequence() {
+    struct OwnBackground(RefCell<Vec<Piece>>);
+    impl<S: PaintScene> ElementPainter<S> for OwnBackground {
+        fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+            let ours = id(el) == Some("box");
+            el.paint_with(scene, |el, scene, piece| {
+                if ours {
+                    self.0.borrow_mut().push(piece);
+                }
+                if ours && piece == Piece::Background && el.paints_own_box() {
+                    let shape = el.css_box().border_box;
+                    scene.fill(Fill::NonZero, el.transform(), RED, None, &shape);
+                } else {
+                    el.piece(scene, piece);
+                }
+            });
+        }
+    }
+    let painter = OwnBackground(RefCell::new(Vec::new()));
+    let mut doc = document(PAGE);
+    let picture = render_to_buffer::<VelloCpuImageRenderer, _>(
+        |scene| paint_scene_with(scene, &mut doc, 1.0, 200, 200, 0, 0, &painter),
+        200,
+        200,
+    );
+    assert_eq!(pixel(&picture, (60, 60)), [255, 0, 0], "own background");
+    assert_eq!(pixel(&picture, (5, 50)), GREEN, "Blitz's border, over it");
+    assert_eq!(pixel(&picture, (20, 20)), [0, 0, 0], "the child");
+    assert_eq!(
+        *painter.0.borrow(),
+        [
+            Piece::Outline,
+            Piece::OuterShadow,
+            Piece::Background,
+            Piece::InsetShadow,
+            Piece::TableParts,
+            Piece::Border,
+            Piece::OwnContent,
+            Piece::Children,
+            Piece::Scrollbars,
+        ]
+    );
+}
+
+/// An inline element that holds only blocks paints no box. A painter can ask.
+#[test]
+fn an_inline_wrapper_of_blocks_paints_no_box() {
+    struct Ask(RefCell<Vec<(String, bool)>>);
+    impl<S: PaintScene> ElementPainter<S> for Ask {
+        fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+            if let Some(name) = id(el) {
+                self.0
+                    .borrow_mut()
+                    .push((name.to_string(), el.paints_own_box()));
+            }
+            el.paint(scene);
+        }
+    }
+    let page = r#"<html><body style="margin:0">
+        <span id="wrapper"><div id="block" style="height:20px"></div></span>
+    </body></html>"#;
+    let asked = Ask(RefCell::new(Vec::new()));
+    let mut doc = document(page);
+    paint_scene_with(&mut NullScenePainter, &mut doc, 1.0, 200, 200, 0, 0, &asked);
+    assert_eq!(
+        *asked.0.borrow(),
+        [("wrapper".to_string(), false), ("block".to_string(), true)]
+    );
 }
 
 /// The content of an element, children included, is clipped to a shape the app chooses.

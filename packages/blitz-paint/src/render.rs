@@ -715,10 +715,36 @@ impl<S: PaintScene> ElementPainter<S> for DefaultPainter {
     }
 }
 
+/// A piece of an element's painting, in the order Blitz paints them. See
+/// [`ElementPaint::paint_with`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Piece {
+    /// The outline.
+    Outline,
+    /// The outer `box-shadow`.
+    OuterShadow,
+    /// The background. First piece inside the `clip-path`, `mask`, `opacity` and `filter`
+    /// layers.
+    Background,
+    /// The inset `box-shadow`.
+    InsetShadow,
+    /// For a table: the backgrounds of its rows and its collapsed borders.
+    TableParts,
+    /// The border.
+    Border,
+    /// The element's own image, text, form control or marker. Inside the `overflow` clip.
+    OwnContent,
+    /// The element's children. Inside the `overflow` clip.
+    Children,
+    /// Overlay scrollbars.
+    Scrollbars,
+}
+
 /// One element that is being painted: where it is, and the pieces it is painted from.
 ///
-/// [`paint`](Self::paint) is the whole element as Blitz paints it. It is written with the
-/// other methods of this type, and reads as the order of painting:
+/// [`paint`](Self::paint) is the whole element as Blitz paints it.
+/// [`paint_with`](Self::paint_with) is the same with a say in each [`Piece`]. For full control
+/// the layers and pieces are methods of their own; this is how `paint` puts them together:
 ///
 /// ```ignore
 /// el.with_box_layers(scene, |el, scene| {         // `clip`, `mix-blend-mode`, `isolation`
@@ -780,23 +806,68 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
         self.cx.scale
     }
 
+    /// Whether the element paints a box of its own. An inline element that holds only blocks
+    /// does not: [`outer_shadow`](Self::outer_shadow), [`background`](Self::background),
+    /// [`inset_shadow`](Self::inset_shadow) and [`border`](Self::border) paint nothing for it,
+    /// and a painter that draws its own version of one of them should not either.
+    pub fn paints_own_box(&self) -> bool {
+        self.paints_own_box
+    }
+
     /// Paint the whole element as Blitz does.
     pub fn paint(&mut self, scene: &mut S) {
+        self.paint_with(scene, |el, scene, piece| el.piece(scene, piece));
+    }
+
+    /// Paint the whole element in Blitz's order and inside Blitz's layers, with `paint_piece`
+    /// called for each [`Piece`] in turn. It paints the piece with
+    /// [`piece`](Self::piece), paints something else in its place, or both:
+    ///
+    /// ```ignore
+    /// el.paint_with(scene, |el, scene, piece| match piece {
+    ///     Piece::Background => my_background(el, scene),
+    ///     piece => el.piece(scene, piece),
+    /// });
+    /// ```
+    ///
+    /// This is the order and nesting [`paint`](Self::paint) uses, so a painter written this
+    /// way follows any change to it.
+    pub fn paint_with(
+        &mut self,
+        scene: &mut S,
+        mut paint_piece: impl FnMut(&mut Self, &mut S, Piece),
+    ) {
+        let each = &mut paint_piece;
         self.with_box_layers(scene, |el, scene| {
-            el.outline(scene);
-            el.outer_shadow(scene);
+            each(el, scene, Piece::Outline);
+            each(el, scene, Piece::OuterShadow);
             el.with_effect_layers(scene, |el, scene| {
-                el.background(scene);
-                el.inset_shadow(scene);
-                el.table_parts(scene);
-                el.border(scene);
+                each(el, scene, Piece::Background);
+                each(el, scene, Piece::InsetShadow);
+                each(el, scene, Piece::TableParts);
+                each(el, scene, Piece::Border);
                 el.with_content_clip(scene, |el, scene| {
-                    el.own_content(scene);
-                    el.children(scene);
+                    each(el, scene, Piece::OwnContent);
+                    each(el, scene, Piece::Children);
                 });
-                el.scrollbars(scene);
+                each(el, scene, Piece::Scrollbars);
             });
         });
+    }
+
+    /// Paint one piece of the element as Blitz does.
+    pub fn piece(&mut self, scene: &mut S, piece: Piece) {
+        match piece {
+            Piece::Outline => self.outline(scene),
+            Piece::OuterShadow => self.outer_shadow(scene),
+            Piece::Background => self.background(scene),
+            Piece::InsetShadow => self.inset_shadow(scene),
+            Piece::TableParts => self.table_parts(scene),
+            Piece::Border => self.border(scene),
+            Piece::OwnContent => self.own_content(scene),
+            Piece::Children => self.children(scene),
+            Piece::Scrollbars => self.scrollbars(scene),
+        }
     }
 
     /// The outermost layers of the element: the CSS 2 `clip` property, and `mix-blend-mode`

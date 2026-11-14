@@ -21,7 +21,7 @@ use blitz_dom::{BaseDocument, NodeId, util::Color};
 use render::BlitzDomPainter;
 
 pub use kurbo_css::{CssBox, NonUniformRoundedRectRadii};
-pub use render::{DefaultPainter, ElementPaint, ElementPainter};
+pub use render::{DefaultPainter, ElementPaint, ElementPainter, Piece};
 
 const FONT_EMBOLDEN_ENABLED: bool = cfg!(any(
     feature = "font-embolden",
