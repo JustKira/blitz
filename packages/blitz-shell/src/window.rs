@@ -7,7 +7,7 @@ use crate::convert_events::{
 use crate::event::{BlitzShellEvent, BlitzShellProxy, create_waker};
 use anyrender::WindowRenderer;
 use blitz_dom::Document;
-use blitz_paint::paint_scene;
+use blitz_paint::{DefaultPainter, ElementPainter, paint_scene_with};
 use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent, MouseEventButton,
     MouseEventButtons, PointerCoords, PointerDetails, UiEvent,
@@ -40,10 +40,16 @@ fn get_safe_area_insets(window: &dyn Window) -> PhysicalInsets<u32> {
     window.safe_area()
 }
 
+/// Paints the elements of a window's document, whatever the lifetime of the renderer's scene.
+/// See [`blitz_paint::ElementPainter`].
+pub type WindowElementPainter<Rend> =
+    Box<dyn for<'s> ElementPainter<<Rend as WindowRenderer>::ScenePainter<'s>>>;
+
 pub struct WindowConfig<Rend: WindowRenderer> {
     doc: Box<dyn Document>,
     pub(crate) attributes: WindowAttributes,
     renderer: Rend,
+    element_painter: Option<WindowElementPainter<Rend>>,
 }
 
 impl<Rend: WindowRenderer> WindowConfig<Rend> {
@@ -60,7 +66,17 @@ impl<Rend: WindowRenderer> WindowConfig<Rend> {
             doc,
             attributes,
             renderer,
+            element_painter: None,
         }
+    }
+
+    /// Paint the window's elements with `painter` in place of Blitz's own painting of them.
+    pub fn with_element_painter(
+        mut self,
+        painter: impl for<'s> ElementPainter<Rend::ScenePainter<'s>> + 'static,
+    ) -> Self {
+        self.element_painter = Some(Box::new(painter));
+        self
     }
 }
 
@@ -68,6 +84,9 @@ pub struct View<Rend: WindowRenderer> {
     pub doc: Box<dyn Document>,
 
     pub renderer: Rend,
+    /// Paints the document's elements on every frame. `None` paints them as Blitz does. It can
+    /// be replaced at any time; ask for a redraw afterwards.
+    pub element_painter: Option<WindowElementPainter<Rend>>,
     pub waker: Option<Waker>,
 
     pub proxy: BlitzShellProxy,
@@ -210,6 +229,7 @@ impl<Rend: WindowRenderer> View<Rend> {
 
         Self {
             renderer: config.renderer,
+            element_painter: config.element_painter,
             waker: None,
             animation_timer: None,
             keyboard_modifiers: Default::default(),
@@ -352,8 +372,9 @@ impl<Rend: WindowRenderer> View<Rend> {
             height + insets.top + insets.bottom,
         );
 
+        let element_painter = self.element_painter.as_deref();
         self.renderer.render(|scene| {
-            paint_scene(
+            paint_scene_with(
                 scene,
                 &mut inner,
                 scale,
@@ -361,6 +382,7 @@ impl<Rend: WindowRenderer> View<Rend> {
                 height,
                 insets.left,
                 insets.top,
+                element_painter.map_or(&DefaultPainter, |painter| painter),
             )
         });
 
@@ -434,8 +456,9 @@ impl<Rend: WindowRenderer> View<Rend> {
         }
 
         if !is_blocked && is_visible {
+            let element_painter = self.element_painter.as_deref();
             self.renderer.render(|scene| {
-                paint_scene(
+                paint_scene_with(
                     scene,
                     &mut inner,
                     scale,
@@ -443,6 +466,7 @@ impl<Rend: WindowRenderer> View<Rend> {
                     height,
                     insets.left,
                     insets.top,
+                    element_painter.map_or(&DefaultPainter, |painter| painter),
                 )
             });
         }
@@ -890,5 +914,22 @@ impl<Rend: WindowRenderer> View<Rend> {
             WindowEvent::DragLeft { .. } => {},
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A painter written for any scene can be given to a window of any renderer, at creation
+    /// or later.
+    #[allow(dead_code)]
+    fn a_painter_for_any_scene_fits_any_renderer<Rend: WindowRenderer>(
+        config: WindowConfig<Rend>,
+        view: &mut View<Rend>,
+    ) -> WindowConfig<Rend> {
+        view.element_painter = Some(Box::new(DefaultPainter));
+        view.element_painter = None;
+        config.with_element_painter(DefaultPainter)
     }
 }
