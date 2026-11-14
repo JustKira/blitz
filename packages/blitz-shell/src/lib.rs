@@ -21,7 +21,7 @@ mod devtools;
 
 pub use crate::application::BlitzApplication;
 pub use crate::event::{BlitzShellEvent, BlitzShellProxy};
-pub use crate::window::{View, WindowConfig, WindowElementPainter};
+pub use crate::window::{BeforePaint, View, WindowConfig, WindowElementPainter};
 
 #[cfg(feature = "data-uri")]
 pub use crate::net::DataUriNetProvider;

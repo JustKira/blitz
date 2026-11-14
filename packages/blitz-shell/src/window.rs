@@ -6,7 +6,7 @@ use crate::convert_events::{
 };
 use crate::event::{BlitzShellEvent, BlitzShellProxy, create_waker};
 use anyrender::WindowRenderer;
-use blitz_dom::Document;
+use blitz_dom::{BaseDocument, Document};
 use blitz_paint::{DefaultPainter, ElementPainter, paint_scene_with};
 use blitz_traits::events::{
     BlitzPointerEvent, BlitzPointerId, BlitzWheelDelta, BlitzWheelEvent, MouseEventButton,
@@ -45,11 +45,15 @@ fn get_safe_area_insets(window: &dyn Window) -> PhysicalInsets<u32> {
 pub type WindowElementPainter<Rend> =
     Box<dyn for<'s> ElementPainter<<Rend as WindowRenderer>::ScenePainter<'s>>>;
 
+/// Called before each frame of a window is painted. See [`View::before_paint`].
+pub type BeforePaint<Rend> = Box<dyn FnMut(&BaseDocument, &mut Rend)>;
+
 pub struct WindowConfig<Rend: WindowRenderer> {
     doc: Box<dyn Document>,
     pub(crate) attributes: WindowAttributes,
     renderer: Rend,
     element_painter: Option<WindowElementPainter<Rend>>,
+    before_paint: Option<BeforePaint<Rend>>,
 }
 
 impl<Rend: WindowRenderer> WindowConfig<Rend> {
@@ -67,6 +71,7 @@ impl<Rend: WindowRenderer> WindowConfig<Rend> {
             attributes,
             renderer,
             element_painter: None,
+            before_paint: None,
         }
     }
 
@@ -78,6 +83,15 @@ impl<Rend: WindowRenderer> WindowConfig<Rend> {
         self.element_painter = Some(Box::new(painter));
         self
     }
+
+    /// Call `before_paint` before each frame is painted. See [`View::before_paint`].
+    pub fn with_before_paint(
+        mut self,
+        before_paint: impl FnMut(&BaseDocument, &mut Rend) + 'static,
+    ) -> Self {
+        self.before_paint = Some(Box::new(before_paint));
+        self
+    }
 }
 
 pub struct View<Rend: WindowRenderer> {
@@ -87,6 +101,12 @@ pub struct View<Rend: WindowRenderer> {
     /// Paints the document's elements on every frame. `None` paints them as Blitz does. It can
     /// be replaced at any time; ask for a redraw afterwards.
     pub element_painter: Option<WindowElementPainter<Rend>>,
+    /// Called before each frame is painted, the first one included: after style and layout
+    /// are resolved for the frame, and before custom widgets and elements are painted. It is
+    /// given the resolved document, to read this frame's layout (for example with
+    /// [`blitz_paint::walk_elements`]), and the renderer, to prepare what the painter will
+    /// draw. Not called for a frame that is not painted.
+    pub before_paint: Option<BeforePaint<Rend>>,
     pub waker: Option<Waker>,
 
     pub proxy: BlitzShellProxy,
@@ -230,6 +250,7 @@ impl<Rend: WindowRenderer> View<Rend> {
         Self {
             renderer: config.renderer,
             element_painter: config.element_painter,
+            before_paint: config.before_paint,
             waker: None,
             animation_timer: None,
             keyboard_modifiers: Default::default(),
@@ -372,6 +393,9 @@ impl<Rend: WindowRenderer> View<Rend> {
             height + insets.top + insets.bottom,
         );
 
+        if let Some(before_paint) = &mut self.before_paint {
+            before_paint(&inner, &mut self.renderer);
+        }
         let element_painter = self.element_painter.as_deref();
         self.renderer.render(|scene| {
             paint_scene_with(
@@ -456,6 +480,9 @@ impl<Rend: WindowRenderer> View<Rend> {
         }
 
         if !is_blocked && is_visible {
+            if let Some(before_paint) = &mut self.before_paint {
+                before_paint(&inner, &mut self.renderer);
+            }
             let element_painter = self.element_painter.as_deref();
             self.renderer.render(|scene| {
                 paint_scene_with(
@@ -930,6 +957,9 @@ mod tests {
     ) -> WindowConfig<Rend> {
         view.element_painter = Some(Box::new(DefaultPainter));
         view.element_painter = None;
-        config.with_element_painter(DefaultPainter)
+        view.before_paint = Some(Box::new(|_doc, _renderer| {}));
+        config
+            .with_element_painter(DefaultPainter)
+            .with_before_paint(|_doc, _renderer| {})
     }
 }
