@@ -1,0 +1,23 @@
+packages/blitz-dom/src/document.rs
+  s_faae8d19c8b66a::t_858628cb651f25 416,593
+packages/blitz-dom/src/paint_hook.rs
+  s_faae8d19c8b66a::t_1e4db85ba9e3f8 141-142,163,170,175,181
+packages/blitz-paint/src/render.rs
+  s_faae8d19c8b66a::t_e08d9b149dc058 597,600,658,661,665,671,674,691,699,926-930
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c23ef4432c47ca51c7b2390f444cf7323bbe436b",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
