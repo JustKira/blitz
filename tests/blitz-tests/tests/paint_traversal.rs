@@ -6,6 +6,7 @@ use blitz_dom::{BaseDocument, DocumentConfig, local_name};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_paint::{
     DefaultPainter, ElementPaint, ElementPainter, Piece, paint_scene, paint_scene_with,
+    walk_elements,
 };
 use blitz_traits::shell::{ColorScheme, Viewport};
 use kurbo::{Circle, Point, Rect};
@@ -313,6 +314,11 @@ fn a_walk_into_no_scene_collects_positions() {
     let found = Collect(RefCell::new(Vec::new()));
     let mut doc = document(&page);
     paint_scene_with(&mut NullScenePainter, &mut doc, 1.0, 200, 200, 0, 0, &found);
+
+    // `walk_elements` is the same walk, for a document that is only read
+    let walked = Collect(RefCell::new(Vec::new()));
+    walk_elements(&doc, 1.0, 200, 200, 0, 0, &walked);
+    assert_eq!(*walked.0.borrow(), *found.0.borrow());
     assert_eq!(
         *found.0.borrow(),
         [
@@ -320,4 +326,30 @@ fn a_walk_into_no_scene_collects_positions() {
             ("child".to_string(), Rect::new(70.0, 30.0, 110.0, 70.0)),
         ]
     );
+}
+
+/// A descendant with a `z-index` is painted by the ancestor that owns its stacking context:
+/// an element that leaves out its children does not leave it out.
+#[test]
+fn a_hoisted_descendant_is_not_one_of_its_parents_paint_children() {
+    struct SkipCard(RefCell<Vec<String>>);
+    impl<S: PaintScene> ElementPainter<S> for SkipCard {
+        fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+            if let Some(name) = id(el) {
+                self.0.borrow_mut().push(name.to_string());
+            }
+            if id(el) != Some("card") {
+                el.with_content_clip(scene, |el, scene| el.children(scene));
+            }
+        }
+    }
+    let page = r#"<html><body style="margin:0">
+        <div id="card">
+            <div id="normal" style="height:10px"></div>
+            <div id="badge" style="position:relative; z-index:1; height:10px"></div>
+        </div>
+    </body></html>"#;
+    let seen = SkipCard(RefCell::new(Vec::new()));
+    walk_elements(&document(page), 1.0, 200, 200, 0, 0, &seen);
+    assert_eq!(*seen.0.borrow(), ["card", "badge"]);
 }

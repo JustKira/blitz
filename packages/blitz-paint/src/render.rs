@@ -764,6 +764,21 @@ pub enum Piece {
 /// });
 /// ```
 ///
+/// What a painter is and is not called for:
+///
+/// - Children are the element's children in *paint* order. A descendant with a `z-index` is
+///   painted by the ancestor that owns its stacking context, not by its parent, so leaving
+///   out or wrapping an element's [`children`](Self::children) does not reach it.
+/// - Text in a line (a plain `<span>`) and table rows and columns are not elements here:
+///   they are painted by [`own_content`](Self::own_content) and
+///   [`table_parts`](Self::table_parts) of the element that holds them.
+/// - The page background taken from the root or `<body>` is painted before any element.
+/// - An element that is hidden or outside the visible area is not reached at all.
+///
+/// The pieces do not check how they are called. Layers pushed by a painter must be popped by
+/// it; [`own_content`](Self::own_content) and [`children`](Self::children) belong inside
+/// [`with_content_clip`](Self::with_content_clip), which applies the scroll offset.
+///
 /// Geometry ([`css_box`](Self::css_box)) is in physical pixels, measured from the top-left
 /// corner of the element's border box. [`transform`](Self::transform) places that space in
 /// the scene.
