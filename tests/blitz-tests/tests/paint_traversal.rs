@@ -421,3 +421,25 @@ fn a_painter_can_locate_other_elements_while_painting() {
     assert_eq!(pixel(&picture, (130, 155)), [255, 0, 0]);
     assert_eq!(pixel(&picture, (105, 155)), WHITE, "moved by its transform");
 }
+
+/// A painter that keeps renderer resources between paints is told when they are gone. One
+/// that keeps nothing does not have to say anything about it.
+#[test]
+fn a_painter_is_told_that_the_renderer_dropped_its_resources() {
+    struct Keeps(RefCell<Vec<u32>>);
+    impl<S: PaintScene> ElementPainter<S> for Keeps {
+        fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+            el.paint(scene)
+        }
+        fn renderer_suspended(&self) {
+            self.0.borrow_mut().clear();
+        }
+    }
+    let keeps = Keeps(RefCell::new(vec![7]));
+    let painter: &dyn ElementPainter<NullScenePainter> = &keeps;
+    painter.renderer_suspended();
+    assert!(keeps.0.borrow().is_empty());
+
+    let nothing: &dyn ElementPainter<NullScenePainter> = &DefaultPainter;
+    nothing.renderer_suspended();
+}

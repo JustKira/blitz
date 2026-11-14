@@ -420,6 +420,11 @@ impl<Rend: WindowRenderer> View<Rend> {
 
         #[cfg(feature = "custom-widget")]
         self.doc.inner_mut().destroy_surfaces();
+
+        // The renderer's resources are gone, the element painter's included
+        if let Some(painter) = &self.element_painter {
+            painter.renderer_suspended();
+        }
     }
 
     pub fn poll(&mut self) -> bool {

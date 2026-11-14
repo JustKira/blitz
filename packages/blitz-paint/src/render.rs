@@ -745,6 +745,14 @@ fn to_peniko_image(image: &RasterImageData, quality: peniko::ImageQuality) -> pe
 /// Implemented for closures: `|el: &mut ElementPaint<'_, S>, scene: &mut S| el.paint(scene)`.
 pub trait ElementPainter<S: PaintScene> {
     fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S);
+
+    /// The renderer has dropped everything that was registered with it, such as textures
+    /// registered through the scene. A painter that keeps such resources between paints
+    /// forgets them here and makes them again the next time it paints.
+    ///
+    /// Called by whoever owns the renderer; a `blitz-shell` window calls it when it is
+    /// suspended. A painter that keeps nothing between paints has no use for it.
+    fn renderer_suspended(&self) {}
 }
 
 impl<S: PaintScene, F: Fn(&mut ElementPaint<'_, S>, &mut S)> ElementPainter<S> for F {
