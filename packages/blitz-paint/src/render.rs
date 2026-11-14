@@ -734,6 +734,14 @@ fn to_peniko_image(image: &RasterImageData, quality: peniko::ImageQuality) -> pe
 /// or wrap them in layers of its own. Children are painted by this same painter, when the
 /// implementation calls [`ElementPaint::children`].
 ///
+/// The call for the document's root element encloses the painting of every other element of
+/// that document: all of them are reached from its [`ElementPaint::children`]. Outside it
+/// Blitz paints only the page background, before, and the devtools overlay, after. A painter
+/// that keeps state for one paint can set it up on entering that call and finish with it
+/// before returning from it. There is no such call in a paint that does not reach the root
+/// element: a document waiting for critical resources, without a root element, or whose root
+/// element is hidden or fully transparent.
+///
 /// Implemented for closures: `|el: &mut ElementPaint<'_, S>, scene: &mut S| el.paint(scene)`.
 pub trait ElementPainter<S: PaintScene> {
     fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S);

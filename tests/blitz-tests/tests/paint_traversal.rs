@@ -292,6 +292,39 @@ fn the_app_draws_between_its_own_pieces_and_children_use_the_same_painter() {
         trace.0.borrow().join(""),
         "<-><-><box><child></child></box></-></->"
     );
+
+    // The root element's call encloses everything, a z-indexed and a fixed descendant included
+    let page = PAGE.replace(
+        "</body>",
+        r#"<div id="high" style="position:relative; z-index:5"></div>
+           <div id="fixed" style="position:fixed; top:0; left:0; width:5px; height:5px"></div>
+           </body>"#,
+    );
+    let trace = Trace(RefCell::new(Vec::new()));
+    paint_scene_with(
+        &mut NullScenePainter,
+        &mut document(&page),
+        1.0,
+        200,
+        200,
+        0,
+        0,
+        &trace,
+    );
+    let trace = trace.0.borrow().join("");
+    assert!(
+        trace.starts_with("<->") && trace.ends_with("</->"),
+        "{trace}"
+    );
+    assert!(
+        trace.contains("<high></high>") && trace.contains("<fixed></fixed>"),
+        "{trace}"
+    );
+    assert_eq!(
+        trace.matches("<->").count(),
+        2,
+        "one html, one body: {trace}"
+    );
 }
 
 /// Walking without drawing gives where every element lands, before anything is painted.
