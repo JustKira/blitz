@@ -353,3 +353,38 @@ fn a_hoisted_descendant_is_not_one_of_its_parents_paint_children() {
     walk_elements(&document(page), 1.0, 200, 200, 0, 0, &seen);
     assert_eq!(*seen.0.borrow(), ["card", "badge"]);
 }
+
+/// While one element is painted, a painter can ask where any other element lands, including
+/// one that is painted later, and draw there.
+#[test]
+fn a_painter_can_locate_other_elements_while_painting() {
+    struct Wire;
+    impl<S: PaintScene> ElementPainter<S> for Wire {
+        fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+            el.paint(scene);
+            if id(el) != Some("first") {
+                return;
+            }
+            // `second` comes later in the document and has not been painted yet
+            let second = el.document().query_selector("#second").unwrap().unwrap();
+            let (transform, css_box) = el.locate(second).unwrap();
+            assert_eq!(
+                transform.transform_rect_bbox(css_box.border_box),
+                Rect::new(110.0, 140.0, 150.0, 170.0)
+            );
+            // The same answer as that element gives about itself
+            assert_eq!(el.locate(el.node().id).unwrap().0, el.transform());
+            assert!(el.locate(el.document().root_node().id).is_none());
+
+            scene.fill(Fill::NonZero, transform, RED, None, &css_box.border_box);
+        }
+    }
+    let page = r#"<html><body style="margin:0; background:#ffffff">
+        <div id="first" style="width:20px; height:20px"></div>
+        <div id="second" style="position:absolute; left:100px; top:140px; width:40px;
+            height:30px; transform:translate(10px, 0)"></div>
+    </body></html>"#;
+    let picture = render(&mut document(page), Wire);
+    assert_eq!(pixel(&picture, (130, 155)), [255, 0, 0]);
+    assert_eq!(pixel(&picture, (105, 155)), WHITE, "moved by its transform");
+}

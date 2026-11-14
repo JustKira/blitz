@@ -6,7 +6,7 @@ mod form_controls;
 mod mask;
 
 use blitz_dom::CopyStyleGetters;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -137,6 +137,9 @@ pub struct BlitzDomPainter<'dom, 'a> {
 
     // Pre-computed `Scene`s for each CustomWidget
     pub(crate) custom_widget_scenes: &'a CustomWidgetSceneMap,
+
+    /// Where each element lands in this paint. Filled the first time a painter asks.
+    located: OnceCell<HashMap<NodeId, (Affine, CssBox)>>,
 }
 
 impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
@@ -175,6 +178,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             draw_text_context: RefCell::new(DrawTextContext::default()),
             selection_ranges,
             custom_widget_scenes,
+            located: OnceCell::new(),
         }
     }
 
@@ -292,6 +296,41 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 );
             }
         }
+    }
+
+    /// Where every element that this paint reaches lands: its transform and boxes at the
+    /// moment it is handed to the painter. Worked out once, by walking the document the way
+    /// the default painter does, without drawing.
+    fn located(&self) -> &HashMap<NodeId, (Affine, CssBox)> {
+        self.located.get_or_init(|| {
+            struct Locate(RefCell<HashMap<NodeId, (Affine, CssBox)>>);
+            impl ElementPainter<anyrender::NullScenePainter> for Locate {
+                fn paint_element(
+                    &self,
+                    el: &mut ElementPaint<'_, anyrender::NullScenePainter>,
+                    scene: &mut anyrender::NullScenePainter,
+                ) {
+                    let found = (el.transform(), el.css_box().clone());
+                    self.0.borrow_mut().insert(el.node().id, found);
+                    el.with_content_clip(scene, |el, scene| el.children(scene));
+                }
+            }
+
+            // The same walk, on its own painter: nothing is shared with the paint in progress
+            let no_widget_scenes = CustomWidgetSceneMap::new();
+            let walker = BlitzDomPainter::new(
+                self.dom,
+                self.scale,
+                self.width,
+                self.height,
+                self.initial_x,
+                self.initial_y,
+                &no_widget_scenes,
+            );
+            let locate = Locate(RefCell::new(HashMap::new()));
+            walker.paint_scene_with(&mut anyrender::NullScenePainter, &locate);
+            locate.0.into_inner()
+        })
     }
 
     fn node_transform(&self, node: &Node, parent: Affine) -> Affine {
@@ -819,6 +858,20 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
     /// Physical pixels per CSS pixel.
     pub fn scale(&self) -> f64 {
         self.cx.scale
+    }
+
+    /// Where another element lands in this paint: its [`transform`](Self::transform) and
+    /// [`css_box`](Self::css_box), as its own painter call sees them. For drawing that
+    /// depends on other elements, whether or not they have been painted yet.
+    ///
+    /// `None` for an element that this paint does not reach (hidden, outside the visible
+    /// area, or not an element). The positions are those of Blitz's own walk; an element
+    /// that a painter leaves out by not calling [`children`](Self::children) is still found.
+    ///
+    /// The first call in a paint walks the document once; later calls look the answer up.
+    pub fn locate(&self, node_id: NodeId) -> Option<(Affine, &CssBox)> {
+        let (transform, css_box) = self.cx.context.located().get(&node_id)?;
+        Some((*transform, css_box))
     }
 
     /// Whether the element paints a box of its own. An inline element that holds only blocks
