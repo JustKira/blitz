@@ -132,8 +132,6 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) layer_manager: LayerManager,
     /// Reusable scratch allocations shared by all text layouts painted for this document.
     pub(crate) draw_text_context: RefCell<DrawTextContext>,
-    /// Bounded geometry cache, scoped to this paint pass (including sub-documents).
-    inset_shadow_cache: RefCell<box_shadow::InsetShadowCache>,
     /// Cached selection ranges for O(1) lookup: node_id -> (start_offset, end_offset)
     pub(crate) selection_ranges: HashMap<NodeId, (usize, usize)>,
 
@@ -175,7 +173,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             scrollbar_drag_target: dom.scrollbar_drag_target(),
             layer_manager,
             draw_text_context: RefCell::new(DrawTextContext::default()),
-            inset_shadow_cache: RefCell::default(),
             selection_ranges,
             custom_widget_scenes,
         }

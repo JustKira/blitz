@@ -119,6 +119,23 @@ impl ElementCx<'_, '_> {
             );
             let spread = shadow.spread.px() as f64 * self.scale;
             let blur = shadow.base.blur.px() as f64 * self.scale;
+            // Without borders or spread, the hole is a translated copy of the
+            // outline. Avoid rebuilding and flattening it for each shadow.
+            if blur == 0.0 && spread == 0.0 && self.frame.border_width == Insets::ZERO {
+                if offset != Vec2::ZERO {
+                    let outer = padding_polygon.get_or_insert_with(|| {
+                        rounded_shadow_polygon(
+                            &padding_box,
+                            self.frame.padding_box,
+                            self.frame.border_radii,
+                            tolerance,
+                        )
+                    });
+                    let ring = translated_shadow_ring(outer, offset);
+                    scene.fill(Fill::NonZero, self.transform, shadow_color, None, &ring);
+                }
+                continue;
+            }
             let hole_rect = self.frame.padding_box.inflate(-spread, -spread) + offset;
 
             // Start with padding-box radii (border radii minus the adjacent border
@@ -140,28 +157,38 @@ impl ElementCx<'_, '_> {
                 // Intersect the hole with the padding box before subtracting it.
                 // Merely clipping their XOR would antialias the outside portion
                 // of the hole back into the box at otherwise unshadowed corners.
-                let key = InsetShadowKey {
-                    padding_box: self.frame.padding_box,
-                    border_width: self.frame.border_width,
-                    border_radii: self.frame.border_radii,
-                    offset,
-                    spread,
-                    tolerance,
-                };
-                let mut cache = self.context.inset_shadow_cache.borrow_mut();
-                let ring = cache.get_or_insert_with(key, || {
-                    if has_hole {
-                        let outer = padding_polygon
-                            .get_or_insert_with(|| shadow_polygon(&padding_box, tolerance));
-                        inset_shadow_ring(
-                            outer,
-                            &shadow_polygon(&hole.border_box_path(), tolerance),
-                        )
+                let ring = if has_hole {
+                    let outer = padding_polygon.get_or_insert_with(|| {
+                        if self.frame.border_width == Insets::ZERO {
+                            rounded_shadow_polygon(
+                                &padding_box,
+                                self.frame.padding_box,
+                                self.frame.border_radii,
+                                tolerance,
+                            )
+                        } else {
+                            shadow_polygon(&padding_box, tolerance)
+                        }
+                    });
+                    let hole_polygon = rounded_shadow_polygon(
+                        &hole.border_box_path(),
+                        hole_rect,
+                        hole.border_radii,
+                        tolerance,
+                    );
+                    // A centered, shrunken hole is contained by the outline.
+                    if offset == Vec2::ZERO
+                        && spread > 0.0
+                        && self.frame.border_width == Insets::ZERO
+                    {
+                        shadow_ring(outer, &hole_polygon)
                     } else {
-                        padding_box.clone()
+                        inset_shadow_ring(outer, &hole_polygon)
                     }
-                });
-                scene.fill(Fill::NonZero, self.transform, shadow_color, None, ring);
+                } else {
+                    padding_box.clone()
+                };
+                scene.fill(Fill::NonZero, self.transform, shadow_color, None, &ring);
                 continue;
             }
 
@@ -270,6 +297,52 @@ fn inset_spread_radius(radius: f64, spread: f64) -> f64 {
     (radius - spread).max(0.0)
 }
 
+/// Equal circular corners are reflections of the same flattened quarter arc.
+/// Flatten it once for this outline; no geometry is retained across elements.
+fn rounded_shadow_polygon(
+    path: &BezPath,
+    bounds: Rect,
+    radii: NonUniformRoundedRectRadii,
+    tolerance: f64,
+) -> Vec<Point> {
+    let top = radii.top_left;
+    let uniform = radii.bottom_left == top && radii.bottom_right == top;
+    let square_bottom = radii.bottom_left == Vec2::ZERO && radii.bottom_right == Vec2::ZERO;
+    if top.x <= 0.0 || top.x != top.y || radii.top_right != top || !(uniform || square_bottom) {
+        return shadow_polygon(path, tolerance);
+    }
+    let end = path
+        .elements()
+        .iter()
+        .skip(1)
+        .position(|el| matches!(el, PathEl::LineTo(_)))
+        .map_or(path.elements().len(), |i| i + 1);
+    let corner = BezPath::from_vec(path.elements()[..end].to_vec());
+    let quarter = shadow_polygon(&corner, tolerance);
+    let mut points = Vec::with_capacity(quarter.len() * 4);
+    let sx = bounds.x0 + bounds.x1;
+    let sy = bounds.y0 + bounds.y1;
+    points.extend(quarter.iter().copied());
+    points.extend(quarter.iter().rev().map(|p| Point::new(sx - p.x, p.y)));
+    if uniform {
+        points.extend(quarter.iter().map(|p| Point::new(sx - p.x, sy - p.y)));
+        points.extend(quarter.iter().rev().map(|p| Point::new(p.x, sy - p.y)));
+    } else {
+        points.push(Point::new(bounds.x1, bounds.y1));
+        points.push(Point::new(bounds.x0, bounds.y1));
+    }
+    // Pill corners can meet without an intervening straight edge.
+    points.dedup_by(|a, b| a.distance_squared(*b) <= 1e-16);
+    if points
+        .first()
+        .zip(points.last())
+        .is_some_and(|(a, b)| a.distance_squared(*b) <= 1e-16)
+    {
+        points.pop();
+    }
+    points
+}
+
 /// Flatten below a hundredth of a device pixel. Reuse the padding polygon for
 /// every unblurred shadow on the element.
 fn shadow_polygon(path: &BezPath, tolerance: f64) -> Vec<Point> {
@@ -296,9 +369,113 @@ fn shadow_polygon(path: &BezPath, tolerance: f64) -> Vec<Point> {
     points
 }
 
-/// Subtract two convex rounded rectangles in geometry, before antialiasing.
-/// Shared edges cancel in the one non-zero fill, including when the hole
-/// contains the entire padding box.
+/// Intersect a convex outline with its translated copy in linear time.
+/// Each pair of corresponding edges is parallel: retain the stricter half-plane.
+/// The edges are already in angular order, so a deque removes each redundant
+/// edge at most once. Subtract the resulting intersection in the same fill to
+/// cancel shared edges before antialiasing.
+fn translated_shadow_ring(outer: &[Point], offset: Vec2) -> BezPath {
+    use std::collections::VecDeque;
+
+    if offset == Vec2::ZERO {
+        return BezPath::new();
+    }
+    let mut boundary: VecDeque<ShadowEdge> = VecDeque::with_capacity(outer.len());
+    let mut vertices: VecDeque<Point> = VecDeque::with_capacity(outer.len());
+    for (&start, &end) in outer.iter().zip(outer.iter().cycle().skip(1)) {
+        let direction = Vec2::new(end.x - start.x, end.y - start.y);
+        let edge = if cross(direction, offset) > 0.0 {
+            ShadowEdge {
+                start: Point::new(start.x + offset.x, start.y + offset.y),
+                end: Point::new(end.x + offset.x, end.y + offset.y),
+            }
+        } else {
+            ShadowEdge { start, end }
+        };
+        while vertices.back().is_some_and(|&p| !edge.contains(p)) {
+            boundary.pop_back();
+            vertices.pop_back();
+        }
+        while vertices.front().is_some_and(|&p| !edge.contains(p)) {
+            boundary.pop_front();
+            vertices.pop_front();
+        }
+        if let Some(previous) = boundary.back() {
+            let Some(point) = previous.intersection(edge) else {
+                let hole: Vec<_> = outer
+                    .iter()
+                    .map(|p| Point::new(p.x + offset.x, p.y + offset.y))
+                    .collect();
+                return inset_shadow_ring(outer, &hole);
+            };
+            vertices.push_back(point);
+        }
+        boundary.push_back(edge);
+    }
+    while vertices.back().is_some_and(|&p| !boundary[0].contains(p)) {
+        boundary.pop_back();
+        vertices.pop_back();
+    }
+    while vertices
+        .front()
+        .is_some_and(|&p| !boundary.back().unwrap().contains(p))
+    {
+        boundary.pop_front();
+        vertices.pop_front();
+    }
+    if boundary.len() < 3 {
+        return shadow_ring(outer, &[]);
+    }
+    let Some(point) = boundary.back().unwrap().intersection(boundary[0]) else {
+        let hole: Vec<_> = outer
+            .iter()
+            .map(|p| Point::new(p.x + offset.x, p.y + offset.y))
+            .collect();
+        return inset_shadow_ring(outer, &hole);
+    };
+    vertices.push_back(point);
+    shadow_ring(outer, vertices.make_contiguous())
+}
+
+#[derive(Clone, Copy)]
+struct ShadowEdge {
+    start: Point,
+    end: Point,
+}
+
+impl ShadowEdge {
+    fn direction(self) -> Vec2 {
+        Vec2::new(self.end.x - self.start.x, self.end.y - self.start.y)
+    }
+
+    fn contains(self, point: Point) -> bool {
+        cross(
+            self.direction(),
+            Vec2::new(point.x - self.start.x, point.y - self.start.y),
+        ) >= 0.0
+    }
+
+    fn intersection(self, other: Self) -> Option<Point> {
+        if self.end == other.start {
+            return Some(self.end);
+        }
+        let d = self.direction();
+        let denominator = cross(d, other.direction());
+        (denominator != 0.0).then(|| {
+            let t = cross(
+                Vec2::new(other.start.x - self.start.x, other.start.y - self.start.y),
+                other.direction(),
+            ) / denominator;
+            Point::new(self.start.x + d.x * t, self.start.y + d.y * t)
+        })
+    }
+}
+
+fn cross(a: Vec2, b: Vec2) -> f64 {
+    a.x * b.y - a.y * b.x
+}
+
+/// General clipping for spread-adjusted holes and padding boxes with borders.
 fn inset_shadow_ring(outer: &[Point], hole: &[Point]) -> BezPath {
     let mut intersection = outer.to_vec();
     let mut scratch = Vec::new();
@@ -332,55 +509,16 @@ fn shadow_ring(outer: &[Point], intersection: &[Point]) -> BezPath {
     if intersection == outer {
         return BezPath::new();
     }
-    let mut ring = BezPath::new();
+    let mut ring = Vec::with_capacity(outer.len() + intersection.len() + 4);
     if let Some((&first, rest)) = outer.split_first() {
-        ring.move_to(first);
-        for &point in rest {
-            ring.line_to(point);
-        }
-        ring.close_path();
+        ring.push(PathEl::MoveTo(first));
+        ring.extend(rest.iter().copied().map(PathEl::LineTo));
+        ring.push(PathEl::ClosePath);
     }
     if let Some((&first, rest)) = intersection.split_last() {
-        ring.move_to(first);
-        for &point in rest.iter().rev() {
-            ring.line_to(point);
-        }
-        ring.close_path();
+        ring.push(PathEl::MoveTo(first));
+        ring.extend(rest.iter().rev().copied().map(PathEl::LineTo));
+        ring.push(PathEl::ClosePath);
     }
-    ring
-}
-
-#[derive(PartialEq)]
-struct InsetShadowKey {
-    padding_box: Rect,
-    border_width: Insets,
-    border_radii: NonUniformRoundedRectRadii,
-    offset: Vec2,
-    spread: f64,
-    tolerance: f64,
-}
-
-/// Reuse identical shadow geometry across elements in one paint pass. Bound the
-/// cache so pages with unique shapes cannot accumulate unbounded path storage.
-/// Color and the element position do not affect the cached local geometry.
-#[derive(Default)]
-pub(super) struct InsetShadowCache {
-    entries: std::collections::VecDeque<(InsetShadowKey, BezPath)>,
-}
-
-impl InsetShadowCache {
-    fn get_or_insert_with(
-        &mut self,
-        key: InsetShadowKey,
-        build: impl FnOnce() -> BezPath,
-    ) -> &BezPath {
-        if let Some(index) = self.entries.iter().position(|(cached, _)| *cached == key) {
-            return &self.entries[index].1;
-        }
-        if self.entries.len() == 16 {
-            self.entries.pop_front();
-        }
-        self.entries.push_back((key, build()));
-        &self.entries.back().unwrap().1
-    }
+    BezPath::from_vec(ring)
 }
