@@ -1,5 +1,7 @@
 //! Versioned storage for the nodes of the DOM tree.
 
+use atomic_refcell::AtomicRefCell;
+use std::collections::HashMap;
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -38,6 +40,10 @@ pub struct NodeTree {
     /// paint child offsets) are memoised against it. Starts at 1 so that a
     /// stamp of 0 is never current.
     geometry_generation: AtomicU64,
+    /// Bounds only for paint subtrees with captured out-of-flow descendants.
+    /// Keep this sparse cache off ordinary nodes and discard older generations
+    /// lazily, so scrolling ordinary documents never populates or clears it.
+    pub(crate) paint_bounds_cache: AtomicRefCell<(u64, HashMap<NodeId, kurbo::Rect>)>,
     /// Scroll offset of the viewport (the root element scrolls the viewport,
     /// so its offset lives here rather than on the node).
     viewport_scroll: crate::Point<f64>,
@@ -48,6 +54,7 @@ impl NodeTree {
         Self {
             map: SlotMap::with_key(),
             geometry_generation: AtomicU64::new(1),
+            paint_bounds_cache: AtomicRefCell::new((0, HashMap::new())),
             viewport_scroll: crate::Point::ZERO,
         }
     }

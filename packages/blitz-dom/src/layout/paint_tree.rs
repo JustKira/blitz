@@ -165,7 +165,7 @@ impl StackingContext {
             let node = tree.get(child.node_id)?;
             let position = child.position(tree, sc_root_id);
             let location = node.final_layout().location;
-            let mut overflow = node.paint_bounds(scale);
+            let mut overflow = node.scrolled_paint_bounds(scale);
             if let Some(transform) = node.transform().as_deref() {
                 overflow = transform.transform_rect_bbox(overflow);
             }
@@ -555,8 +555,29 @@ impl BaseDocument {
 
 impl Node {
     fn is_viewport_containing_block(&self) -> bool {
+        use style::values::computed::{Contain, ContainerType};
+        use style::values::specified::box_::WillChangeBits;
+
         self.containing_block()
             .is_none_or(|id| matches!(self.tree()[id].data, crate::node::NodeData::Document(_)))
+            && !self.primary_styles().is_some_and(|style| {
+                // Unlike transforms and containment, filters (and will-change
+                // for filters) do not establish a fixed containing block on
+                // the document root. Do not use the non-root claims here.
+                let box_style = style.get_box();
+                box_style.has_transform_or_perspective()
+                    || box_style.will_change.bits.intersects(
+                        WillChangeBits::TRANSFORM
+                            | WillChangeBits::PERSPECTIVE
+                            | WillChangeBits::CONTAIN,
+                    )
+                    || box_style
+                        .contain
+                        .intersects(Contain::LAYOUT | Contain::PAINT)
+                    || box_style
+                        .container_type
+                        .intersects(ContainerType::SIZE | ContainerType::INLINE_SIZE)
+            })
     }
 
     /// Whether this node paints its positioned descendants itself (CSS 2.1
@@ -595,8 +616,17 @@ impl Node {
     /// painted, excluding its own `final_layout().location`, when it is in the
     /// paint list of `painter_id` without being laid out relative to it (a
     /// positioned box lifted past static ancestors).
+    #[inline]
     pub fn lifted_paint_offset(&self, painter_id: NodeId) -> Option<Point<f32>> {
         match self.containing_block() {
+            // Most paint children are ordinary layout children. Avoid reading
+            // computed positioning styles for them on every paint and hit.
+            Some(id)
+                if id == painter_id
+                    && !self.out_of_flow.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                None
+            }
             Some(id)
                 if self.taffy_position() == taffy::Position::Fixed
                     && self.tree()[id].is_viewport_containing_block() =>
@@ -613,11 +643,27 @@ impl Node {
     /// Layout overflow follows containing blocks, so it alone cannot bound
     /// boxes painted by an intervening stacking context. Cache the union over
     /// the paint tree separately; do not change layout's overflow or clipping.
+    #[inline]
     pub fn paint_bounds(&self, scale: f64) -> kurbo::Rect {
+        // Ordinary subtrees retain layout's bounds without walking paint lists
+        // or populating a cache that would be invalidated by every scroll.
+        if !self.flags.has_reparented_oof_paint() {
+            return *self.scrollable_overflow();
+        }
+        self.reparented_paint_bounds(scale)
+    }
+
+    fn reparented_paint_bounds(&self, scale: f64) -> kurbo::Rect {
         let generation = self.tree().geometry_generation();
-        let (stamp, cached) = self.paint_bounds_cache.get();
-        if stamp == generation {
-            return cached;
+        {
+            let mut cache = self.tree().paint_bounds_cache.borrow_mut();
+            if cache.0 != generation {
+                cache.0 = generation;
+                cache.1.clear();
+            }
+            if let Some(bounds) = cache.1.get(&self.id) {
+                return *bounds;
+            }
         }
         let mut bounds = *self.scrollable_overflow();
         if let Some(sc) = &self.stacking_context {
@@ -633,7 +679,7 @@ impl Node {
             let Some(child) = self.tree().get(*id) else {
                 continue;
             };
-            let mut child_bounds = child.paint_bounds(scale);
+            let mut child_bounds = child.scrolled_paint_bounds(scale);
             if let Some(transform) = child.transform().as_deref() {
                 child_bounds = transform.transform_rect_bbox(child_bounds);
             }
@@ -647,8 +693,25 @@ impl Node {
                     ),
             );
         }
-        self.paint_bounds_cache.set((generation, bounds));
+        self.tree()
+            .paint_bounds_cache
+            .borrow_mut()
+            .1
+            .insert(self.id, bounds);
         bounds
+    }
+
+    /// Bounds for culling and effect clips, before this box's scroll transform
+    /// is applied. Captured descendants' offsets compensate for scrolling, so
+    /// convert their content bounds back to border-box coordinates here (and
+    /// when including a child's bounds in its painter's content bounds).
+    #[inline]
+    pub fn scrolled_paint_bounds(&self, scale: f64) -> kurbo::Rect {
+        if !self.flags.has_reparented_oof_paint() {
+            return *self.scrollable_overflow();
+        }
+        self.reparented_paint_bounds(scale)
+            - kurbo::Vec2::new(self.scroll_offset().x, self.scroll_offset().y) * scale
     }
 }
 

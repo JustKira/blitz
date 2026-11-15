@@ -24,8 +24,12 @@ fn document(position: &str, parent: &str, child: &str, extra_css: &str) -> HtmlD
         </style></head><body><div id=cb><div id=parent><div id=middle><div id=child></div></div></div></div>
         <div><div id=control></div></div></body></html>"#
     );
+    from_html(&html)
+}
+
+fn from_html(html: &str) -> HtmlDocument {
     let mut doc = HtmlDocument::from_html(
-        &html,
+        html,
         DocumentConfig {
             viewport: Some(Viewport::new(SIZE, SIZE, 1.0, ColorScheme::Light)),
             html_parser_provider: Some(Arc::new(HtmlProvider) as _),
@@ -196,4 +200,90 @@ fn other_stacking_context_roots_capture_oof_children() {
     // clip whose containing block is outside the clipping ancestor.
     let mut clipped = document("absolute", "opacity:0.5; clip-path:inset(0)", "", "");
     assert_eq!(pixel(&render(&mut clipped), 45, 55), [255; 3]);
+}
+
+#[test]
+fn captured_children_remain_visible_after_intervening_scroll() {
+    for (effect, top, expected) in [
+        ("opacity:0.5", 100, [255, 127, 127]),
+        ("isolation:isolate", 500, [255, 0, 0]),
+    ] {
+        for position in ["absolute", "fixed"] {
+            for z_index in ["auto", "1"] {
+                let mut doc = from_html(&format!(
+                    r#"<style>
+                    body {{ margin:0; background:white; height:2000px; padding-top:{top}px }}
+                    #sc {{ {effect}; overflow:scroll; width:100px; height:100px }}
+                    #tall {{ height:1000px }}
+                    #child {{ position:{position}; z-index:{z_index}; left:10px; top:10px;
+                              width:20px; height:20px; background:red }}
+                    </style><div id=sc><div id=tall></div><div id=child></div></div>"#
+                ));
+                let sc = doc.query_selector("#sc").unwrap().unwrap();
+                let child = doc.query_selector("#child").unwrap().unwrap();
+                for delta in [0.0, -100.0, 100.0] {
+                    doc.scroll_node_by(sc, 0.0, delta, |_| {});
+                    assert_eq!(doc.hit(20.0, 20.0).unwrap().node_id, child);
+                    assert_eq!(
+                        pixel(&render(&mut doc), 20, 20),
+                        expected,
+                        "{effect}, {position}, z-index:{z_index}, scroll delta:{delta}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fixed_children_of_transformed_root_scroll_with_document() {
+    for z_index in ["1", "auto"] {
+        let mut doc = from_html(&format!(
+            r#"<style>
+            html {{ transform:translateX(20px) }}
+            body {{ margin:0; background:white; height:1000px }}
+            #child {{ position:fixed; z-index:{z_index}; left:10px; top:50px;
+                      width:20px; height:20px; background:red }}
+            </style><div id=child></div>"#
+        ));
+        let child = doc.query_selector("#child").unwrap().unwrap();
+        assert_eq!(pixel(&render(&mut doc), 40, 60), [255, 0, 0]);
+        doc.set_viewport_scroll(blitz_dom::Point { x: 0.0, y: 30.0 });
+        let buffer = render(&mut doc);
+        assert_eq!(pixel(&buffer, 40, 30), [255, 0, 0], "z-index:{z_index}");
+        assert_eq!(pixel(&buffer, 40, 60), [255; 3], "z-index:{z_index}");
+        assert_eq!(doc.hit(40.0, 60.0).unwrap().node_id, child);
+        assert_ne!(doc.hit(40.0, 90.0).unwrap().node_id, child);
+    }
+}
+
+#[test]
+fn element_from_point_uses_viewport_coordinates_after_scroll() {
+    let mut doc = from_html(
+        r#"<style>
+        body { margin:0; background:white; height:1000px; width:1000px }
+        #fixed { position:fixed; left:10px; top:50px; width:20px; height:20px; background:red }
+        #absolute { position:absolute; left:80px; top:80px; width:20px; height:20px; background:red }
+        #flow { margin-left:150px; margin-top:80px; width:20px; height:20px; background:red }
+        </style><div id=fixed></div><div id=absolute></div><div id=flow></div>"#,
+    );
+    doc.set_viewport_scroll(blitz_dom::Point { x: 5.0, y: 30.0 });
+    // CSSOM View's elementFromPoint tests use client rects after scrollIntoView:
+    // the API consumes viewport coordinates for fixed and scrolling content alike.
+    for (selector, x) in [("#fixed", 20), ("#absolute", 85), ("#flow", 155)] {
+        let target = doc.query_selector(selector).unwrap().unwrap();
+        assert_eq!(pixel(&render(&mut doc), x, 60), [255, 0, 0]);
+        assert_eq!(doc.hit(x as f32 + 5.0, 90.0).unwrap().node_id, target);
+        assert_eq!(
+            doc.element_from_point(x as f32, 60.0),
+            Some(target),
+            "{selector}"
+        );
+        assert_eq!(
+            doc.elements_from_point(x as f32, 60.0).first(),
+            Some(&target)
+        );
+    }
+    assert_eq!(doc.element_from_point(-1.0, 60.0), None);
+    assert!(doc.elements_from_point(20.0, SIZE as f32 + 1.0).is_empty());
 }

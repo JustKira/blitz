@@ -132,8 +132,6 @@ pub struct Node {
     /// stacking context on its last (non-skipped) paint-tree build. Replayed
     /// when the subtree is skipped as clean. Empty for stacking-context roots.
     pub sc_contribution_cache: RefCell<ThinVec<HoistedPaintChild>>,
-    /// Geometry-generation cache for bounds derived from the paint tree.
-    pub(crate) paint_bounds_cache: Cell<(u64, KurboRect)>,
 
     // Flags
     pub flags: NodeFlags,
@@ -435,7 +433,6 @@ impl Node {
             paint_children: RefCell::new(None),
             stacking_context: None,
             sc_contribution_cache: RefCell::new(ThinVec::new()),
-            paint_bounds_cache: Cell::new((0, KurboRect::ZERO)),
 
             flags: NodeFlags::empty(),
             out_of_flow: AtomicBool::new(false),
@@ -1444,6 +1441,22 @@ impl Node {
         scale: f64,
         scrollbar: &mut Option<crate::node::ScrollbarRef>,
     ) -> Option<HitResult> {
+        // Select layout-only bounds once for an ordinary paint subtree. Its
+        // recursive descent then retains the pre-reparenting hit-test path.
+        if self.flags.has_reparented_oof_paint() {
+            self.hit_inner_impl::<true>(x, y, scale, scrollbar)
+        } else {
+            self.hit_inner_impl::<false>(x, y, scale, scrollbar)
+        }
+    }
+
+    fn hit_inner_impl<const REPARENTED: bool>(
+        &self,
+        x: f32,
+        y: f32,
+        scale: f64,
+        scrollbar: &mut Option<crate::node::ScrollbarRef>,
+    ) -> Option<HitResult> {
         use style::computed_values::pointer_events::T as PointerEvents;
         use style::computed_values::visibility::T as Visibility;
 
@@ -1524,7 +1537,11 @@ impl Node {
 
         // `scrollable_overflow` is stored in device (scaled) pixels, whereas the
         // coordinates here are in CSS pixels, so unscale it before comparing.
-        let overflow = self.paint_bounds(scale);
+        let overflow = if REPARENTED {
+            self.paint_bounds(scale)
+        } else {
+            *self.scrollable_overflow()
+        };
 
         let matches_overflow = x >= (overflow.x0 / scale) as f32
             && x <= (overflow.x1 / scale) as f32
@@ -1571,7 +1588,7 @@ impl Node {
                     let pos = hoisted_child.position(self.tree(), self.id);
                     let x = x - pos.x;
                     let y = y - pos.y;
-                    if let Some(hit) = child.hit_inner(x, y, scale, scrollbar) {
+                    if let Some(hit) = child.hit_inner_impl::<REPARENTED>(x, y, scale, scrollbar) {
                         return Some(hit);
                     }
                 }
@@ -1589,7 +1606,9 @@ impl Node {
                 child_x -= offset.x;
                 child_y -= offset.y;
             }
-            if let Some(hit) = child.hit_inner(child_x, child_y, scale, scrollbar) {
+            if let Some(hit) =
+                child.hit_inner_impl::<REPARENTED>(child_x, child_y, scale, scrollbar)
+            {
                 return Some(hit);
             }
         }
@@ -1604,7 +1623,7 @@ impl Node {
                     let pos = hoisted_child.position(self.tree(), self.id);
                     let x = x - pos.x;
                     let y = y - pos.y;
-                    if let Some(hit) = child.hit_inner(x, y, scale, scrollbar) {
+                    if let Some(hit) = child.hit_inner_impl::<REPARENTED>(x, y, scale, scrollbar) {
                         return Some(hit);
                     }
                 }
