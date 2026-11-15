@@ -653,13 +653,15 @@ fn fixed_boxes_scroll_only_with_a_non_viewport_containing_block() {
         );
 
         doc.set_viewport_scroll(blitz_dom::Point { x: 0.0, y: 30.0 });
+        // BaseDocument::hit takes document coordinates (as does set_hover_to),
+        // so the viewport-fixed boxes' document-space positions include scroll.
         assert_eq!(
-            hit(&doc, 20.0, 60.0),
+            hit(&doc, 20.0, 90.0),
             g0,
             "z-auto fixed under viewport scroll ({incremental})"
         );
         assert_eq!(
-            hit(&doc, 60.0, 60.0),
+            hit(&doc, 60.0, 90.0),
             g1,
             "z-index fixed under viewport scroll ({incremental})"
         );

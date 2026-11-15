@@ -6,7 +6,7 @@ mod form_controls;
 mod mask;
 
 use blitz_dom::CopyStyleGetters;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -55,6 +55,14 @@ use taffy::Layout;
 /// compositing would erase the backdrop behind the element rather than just the
 /// element's own content.
 pub(super) const ALMOST_OPAQUE: f32 = 1.0 - f32::EPSILON;
+
+struct OverflowClip {
+    node_id: NodeId,
+    path: kurbo::BezPath,
+    transform: Affine,
+    screen_bbox: Rect,
+    applied: Cell<bool>,
+}
 
 /// A view of the track positions reported by taffy in physical (left-to-right /
 /// top-to-bottom) order. Taffy reports tracks in logical order, which for RTL grid
@@ -132,6 +140,8 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) layer_manager: LayerManager,
     /// Reusable scratch allocations shared by all text layouts painted for this document.
     pub(crate) draw_text_context: RefCell<DrawTextContext>,
+    overflow_clips: RefCell<Vec<OverflowClip>>,
+    escapes_clip_cache: RefCell<HashMap<(NodeId, NodeId), bool>>,
     /// Cached selection ranges for O(1) lookup: node_id -> (start_offset, end_offset)
     pub(crate) selection_ranges: HashMap<NodeId, (usize, usize)>,
 
@@ -173,6 +183,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             scrollbar_drag_target: dom.scrollbar_drag_target(),
             layer_manager,
             draw_text_context: RefCell::new(DrawTextContext::default()),
+            overflow_clips: RefCell::new(Vec::new()),
+            escapes_clip_cache: RefCell::new(HashMap::new()),
             selection_ranges,
             custom_widget_scenes,
         }
@@ -413,6 +425,85 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         clip_rect: Rect,
     ) {
         let node = &self.dom.as_ref().tree()[node_id];
+        self.with_overflow_clips(scene, node, true, clip_rect, |scene, clip_rect| {
+            self.render_element_inner(scene, node_id, parent_style_transform, clip_rect);
+        });
+    }
+
+    fn is_inside_clip(&self, node: &Node, clip_id: NodeId) -> bool {
+        let mut current = node.containing_block();
+        while let Some(id) = current {
+            if id == clip_id {
+                return true;
+            }
+            current = self.dom.as_ref().tree()[id].containing_block();
+        }
+        false
+    }
+
+    fn subtree_escapes_clip(&self, node: &Node, clip_id: NodeId) -> bool {
+        let key = (node.id, clip_id);
+        if let Some(&escapes) = self.escapes_clip_cache.borrow().get(&key) {
+            return escapes;
+        }
+        let escapes = !self.is_inside_clip(node, clip_id)
+            || node
+                .paint_children
+                .borrow()
+                .iter()
+                .flatten()
+                .any(|id| self.subtree_escapes_clip(&self.dom.as_ref().tree()[*id], clip_id))
+            || node.stacking_context.as_ref().is_some_and(|sc| {
+                sc.children.iter().any(|child| {
+                    self.subtree_escapes_clip(&self.dom.as_ref().tree()[child.node_id], clip_id)
+                })
+            });
+        self.escapes_clip_cache.borrow_mut().insert(key, escapes);
+        escapes
+    }
+
+    /// Overflow clips follow positioning ancestry, unlike atomic effects.
+    /// Apply a clip around a whole subtree when possible. If an out-of-flow
+    /// descendant escapes it, defer the clip to the affected boxes' own paint
+    /// operations, keeping the descendant inside opacity/filter layers.
+    fn with_overflow_clips<S: PaintScene>(
+        &self,
+        scene: &mut S,
+        node: &Node,
+        subtree: bool,
+        mut clip_rect: Rect,
+        paint: impl FnOnce(&mut S, Rect),
+    ) {
+        let mut applied = Vec::new();
+        for (index, clip) in self.overflow_clips.borrow().iter().enumerate() {
+            if !clip.applied.get()
+                && if subtree {
+                    !self.subtree_escapes_clip(node, clip.node_id)
+                } else {
+                    node.id == clip.node_id || self.is_inside_clip(node, clip.node_id)
+                }
+            {
+                scene.push_clip_layer(Fill::NonZero, clip.transform, &clip.path);
+                clip.applied.set(true);
+                clip_rect = clip_rect.intersect(clip.screen_bbox);
+                applied.push(index);
+            }
+        }
+        paint(scene, clip_rect);
+        for index in applied.into_iter().rev() {
+            scene.pop_layer();
+            self.overflow_clips.borrow()[index].applied.set(false);
+        }
+    }
+
+    fn render_element_inner(
+        &self,
+        scene: &mut impl PaintScene,
+        node_id: NodeId,
+        parent_style_transform: Affine,
+        clip_rect: Rect,
+    ) {
+        let node = &self.dom.as_ref().tree()[node_id];
 
         // Early return if the element is hidden
         if matches!(node.taffy_display(), taffy::Display::None) {
@@ -471,7 +562,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         };
 
         // Don't render things that are out of view
-        let overflow = *node.scrollable_overflow();
+        let overflow = node.paint_bounds(self.scale);
         let transform = self.node_transform(node, parent_style_transform);
         let screen_transform = Affine::translate(Vec2 {
             x: -self.initial_x,
@@ -509,8 +600,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         // Optimise zero-area (/very small area) clips by not rendering at all
         let clip_area = content_box_size.width * content_box_size.height;
-        let overflow_area =
-            node.scrollable_overflow().width() * node.scrollable_overflow().height();
+        let overflow_area = overflow.width() * overflow.height();
         if should_clip && clip_area < 0.01 && overflow_area < 0.01 {
             return;
         }
@@ -523,21 +613,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // Apply CSS transform property (where transforms are 2d)
 
         let mut cx = self.element_cx(node, *node.final_layout(), transform, custom_widget_scene);
-
-        // If this element clips its overflow it establishes a scrollport: narrow the clip
-        // rectangle passed to descendants to the visible (clipped) region so that content
-        // scrolled out of view is culled rather than drawn and clipped away. The box used
-        // here matches the clip applied to the content below.
-        let child_clip_rect = if should_clip {
-            let clip_box = if is_text_input {
-                cx.frame.text_input_clip_path()
-            } else {
-                cx.frame.padding_box_path()
-            };
-            clip_rect.intersect(screen_transform.transform_rect_bbox(clip_box.bounding_box()))
-        } else {
-            clip_rect
-        };
 
         // Compute clip-path (if any) and wrap all rendering in a clip layer
         let clip_path_shape = cx.clip_path_shape();
@@ -585,10 +660,12 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         let paints_own_box = !node.is_inline_with_only_block_children();
 
-        cx.draw_outline(scene);
-        if paints_own_box {
-            cx.draw_outset_box_shadow(scene);
-        }
+        self.with_overflow_clips(scene, node, false, clip_rect, |scene, _| {
+            cx.draw_outline(scene);
+            if paints_own_box {
+                cx.draw_outset_box_shadow(scene);
+            }
+        });
 
         // clip-path clip ayer
         self.layer_manager.maybe_with_layer(
@@ -624,14 +701,19 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     .map(|f| f.expansion_rect())
                     .unwrap_or(Rect::ZERO);
 
+                // Effect layers must include boxes painted here even when
+                // layout assigned their overflow to an ancestor containing
+                // block. Overflow/clip-path clips are still applied separately.
                 let mut effect_layer_clip = cx.frame.border_box_path().bounding_box();
+                if node.flags.has_reparented_oof_paint() {
+                    effect_layer_clip = effect_layer_clip.union(overflow);
+                }
                 effect_layer_clip.x0 += filter_expansion_area.x0;
                 effect_layer_clip.y0 += filter_expansion_area.y0;
                 effect_layer_clip.x1 += filter_expansion_area.x1;
                 effect_layer_clip.y1 += filter_expansion_area.y1;
 
                 // Opacity/Filter layer if box has opacity or a filter.
-                // Clipped to border-box as it needs to include the background and borders.
                 self.layer_manager.maybe_with_layer(
                     scene,
                     has_opacity || filter.is_some() || backdrop_filter.is_some(),
@@ -642,62 +724,98 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                     filter,
                     backdrop_filter,
                     |scene| {
-                        if paints_own_box {
-                            cx.draw_background(scene);
-                            cx.draw_inset_box_shadow(scene);
-                        }
-                        cx.draw_table_row_backgrounds(scene);
-                        cx.draw_table_borders(scene);
-                        if paints_own_box {
-                            cx.draw_border(scene);
-                        }
-                        cx.stroke_devtools(scene);
+                        self.with_overflow_clips(scene, node, false, clip_rect, |scene, _| {
+                            if paints_own_box {
+                                cx.draw_background(scene);
+                                cx.draw_inset_box_shadow(scene);
+                            }
+                            cx.draw_table_row_backgrounds(scene);
+                            cx.draw_table_borders(scene);
+                            if paints_own_box {
+                                cx.draw_border(scene);
+                            }
+                            cx.stroke_devtools(scene);
+                        });
 
-                        // TODO: allow layers with opacity to be unclipped (overflow: visible)
                         let clip = if is_text_input {
                             &cx.frame.text_input_clip_path()
                         } else {
                             &cx.frame.padding_box_path()
                         };
 
-                        // Clip layer if box requires clipping. Opacity set to 1.0
-                        self.layer_manager.maybe_with_layer(
+                        let defer_clip = should_clip
+                            && (node.paint_children.borrow().iter().flatten().any(|id| {
+                                self.subtree_escapes_clip(&self.dom.as_ref().tree()[*id], node_id)
+                            }) || node.stacking_context.as_ref().is_some_and(|sc| {
+                                sc.children.iter().any(|entry| {
+                                    self.subtree_escapes_clip(
+                                        &self.dom.as_ref().tree()[entry.node_id],
+                                        node_id,
+                                    )
+                                })
+                            }));
+                        if defer_clip {
+                            self.overflow_clips.borrow_mut().push(OverflowClip {
+                                node_id,
+                                path: clip.to_path(0.1),
+                                transform: cx.transform,
+                                screen_bbox: screen_transform
+                                    .transform_rect_bbox(clip.bounding_box()),
+                                applied: Cell::new(false),
+                            });
+                        }
+                        // Keep one clip around ordinary contents. Only the
+                        // escaping case needs per-box deferred clips.
+                        let clip_pushed = self.layer_manager.maybe_push_layer(
                             scene,
-                            should_clip,
+                            should_clip && !defer_clip,
                             BlendMode::default(),
-                            1.0, // opacity
+                            1.0,
                             cx.transform,
                             clip,
                             None,
                             None,
-                            |scene| {
-                                // Now that background has been drawn, offset pos and cx in order to draw our contents scrolled
-                                let content_position = Point {
-                                    x: content_position.x - node.scroll_offset().x,
-                                    y: content_position.y - node.scroll_offset().y,
-                                };
-
-                                cx.transform = self.scrolled_transform(node, cx.transform);
-                                cx.draw_image(scene);
-                                #[cfg(feature = "svg")]
-                                cx.draw_svg(scene);
-                                #[cfg(feature = "custom-widget")]
-                                cx.draw_custom_widget(scene);
-                                cx.draw_sub_document(scene);
-                                cx.draw_input(scene);
-                                cx.draw_text_input_text(scene, content_position);
-                                cx.draw_inline_layout(scene, content_position);
-                                cx.draw_marker(scene, content_position);
-                                cx.draw_children(scene, cx.transform, child_clip_rect);
-                            },
                         );
+                        let child_clip_rect = if should_clip && !defer_clip {
+                            clip_rect.intersect(
+                                screen_transform.transform_rect_bbox(clip.bounding_box()),
+                            )
+                        } else {
+                            clip_rect
+                        };
+                        self.with_overflow_clips(scene, node, false, clip_rect, |scene, _| {
+                            // Now that background has been drawn, offset pos and cx in order to draw our contents scrolled
+                            let content_position = Point {
+                                x: content_position.x - node.scroll_offset().x,
+                                y: content_position.y - node.scroll_offset().y,
+                            };
+
+                            cx.transform = self.scrolled_transform(node, cx.transform);
+                            cx.draw_image(scene);
+                            #[cfg(feature = "svg")]
+                            cx.draw_svg(scene);
+                            #[cfg(feature = "custom-widget")]
+                            cx.draw_custom_widget(scene);
+                            cx.draw_sub_document(scene);
+                            cx.draw_input(scene);
+                            cx.draw_text_input_text(scene, content_position);
+                            cx.draw_inline_layout(scene, content_position);
+                            cx.draw_marker(scene, content_position);
+                        });
+                        cx.draw_children(scene, cx.transform, child_clip_rect);
+                        self.layer_manager.maybe_pop_layer(scene, clip_pushed);
+                        if defer_clip {
+                            self.overflow_clips.borrow_mut().pop();
+                        }
 
                         // Overlay scrollbars, drawn unscrolled above the
                         // clipped content.
                         #[cfg(feature = "scrollbars")]
                         {
                             cx.transform = unscrolled_transform;
-                            cx.draw_scrollbars(scene);
+                            self.with_overflow_clips(scene, node, false, clip_rect, |scene, _| {
+                                cx.draw_scrollbars(scene);
+                            });
                         }
                     },
                 );
@@ -1179,20 +1297,9 @@ impl ElementCx<'_, '_> {
         // Regular children
         if let Some(children) = &*self.node.paint_children.borrow() {
             for child_id in children {
-                // Fixed-position children of the root element are positioned against
-                // the viewport and do not scroll with it, so cancel out the viewport
-                // scroll (applied in `paint_scene`). A fixed box contained by a
-                // transformed ancestor scrolls with it like any out-of-flow box.
                 let child = &self.context.dom.as_ref().tree()[*child_id];
-                let child_transform = if child.taffy_position() == taffy::Position::Fixed
-                    && Some(self.node.id) == self.context.root_element_id
+                let child_transform = if let Some(offset) = child.lifted_paint_offset(self.node.id)
                 {
-                    let scroll = self.context.dom.as_ref().viewport_scroll();
-                    parent_style_transform.pre_translate(kurbo::Vec2 {
-                        x: scroll.x * self.scale,
-                        y: scroll.y * self.scale,
-                    })
-                } else if let Some(offset) = child.lifted_paint_offset(self.node.id) {
                     parent_style_transform.pre_translate(kurbo::Vec2 {
                         x: offset.x as f64 * self.scale,
                         y: offset.y as f64 * self.scale,

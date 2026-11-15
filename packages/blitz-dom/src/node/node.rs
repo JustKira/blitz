@@ -60,6 +60,9 @@ bitflags! {
         const IS_IN_DOCUMENT = 0b00000100;
         /// Whether the node is an inline box whose in-flow content is block-level only
         const IS_INLINE_WITH_ONLY_BLOCK_CHILDREN = 0b00001000;
+        /// Paint subtree contains an out-of-flow box captured by a stacking
+        /// context below its containing block. Set by paint-tree construction.
+        const HAS_REPARENTED_OOF_PAINT = 0b00010000;
     }
 }
 
@@ -80,10 +83,16 @@ impl NodeFlags {
     }
 
     #[inline(always)]
+    pub fn has_reparented_oof_paint(&self) -> bool {
+        self.contains(Self::HAS_REPARENTED_OOF_PAINT)
+    }
+
+    #[inline(always)]
     pub fn reset_construction_flags(&mut self) {
         self.remove(Self::IS_INLINE_ROOT);
         self.remove(Self::IS_TABLE_ROOT);
         self.remove(Self::IS_INLINE_WITH_ONLY_BLOCK_CHILDREN);
+        self.remove(Self::HAS_REPARENTED_OOF_PAINT);
     }
 }
 
@@ -123,6 +132,8 @@ pub struct Node {
     /// stacking context on its last (non-skipped) paint-tree build. Replayed
     /// when the subtree is skipped as clean. Empty for stacking-context roots.
     pub sc_contribution_cache: RefCell<ThinVec<HoistedPaintChild>>,
+    /// Geometry-generation cache for bounds derived from the paint tree.
+    pub(crate) paint_bounds_cache: Cell<(u64, KurboRect)>,
 
     // Flags
     pub flags: NodeFlags,
@@ -424,6 +435,7 @@ impl Node {
             paint_children: RefCell::new(None),
             stacking_context: None,
             sc_contribution_cache: RefCell::new(ThinVec::new()),
+            paint_bounds_cache: Cell::new((0, KurboRect::ZERO)),
 
             flags: NodeFlags::empty(),
             out_of_flow: AtomicBool::new(false),
@@ -1512,7 +1524,7 @@ impl Node {
 
         // `scrollable_overflow` is stored in device (scaled) pixels, whereas the
         // coordinates here are in CSS pixels, so unscale it before comparing.
-        let overflow = *self.scrollable_overflow();
+        let overflow = self.paint_bounds(scale);
 
         let matches_overflow = x >= (overflow.x0 / scale) as f32
             && x <= (overflow.x1 / scale) as f32
@@ -1571,22 +1583,9 @@ impl Node {
             let Some(child) = self.tree().get(*child_id) else {
                 continue;
             };
-            let child_position = child.taffy_position();
             let mut child_x = x;
             let mut child_y = y;
-            if child_position.is_out_of_flow() {
-                // Fixed-position children of the root element are positioned
-                // against the viewport and do not scroll with it. (A fixed box
-                // whose containing block is a transformed ancestor scrolls with
-                // that ancestor like any other out-of-flow box.)
-                if child_position == taffy::Position::Fixed && self.containing_block().is_none() {
-                    child_x -= self.scroll_offset().x as f32;
-                    child_y -= self.scroll_offset().y as f32;
-                    let viewport_scroll = self.tree().viewport_scroll();
-                    child_x -= viewport_scroll.x as f32;
-                    child_y -= viewport_scroll.y as f32;
-                }
-            } else if let Some(offset) = child.lifted_paint_offset(self.id) {
+            if let Some(offset) = child.lifted_paint_offset(self.id) {
                 child_x -= offset.x;
                 child_y -= offset.y;
             }
