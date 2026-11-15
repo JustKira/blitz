@@ -140,6 +140,9 @@ pub struct BlitzDomPainter<'dom, 'a> {
 
     /// Where each element lands in this paint. Filled the first time a painter asks.
     located: OnceCell<HashMap<NodeId, (Affine, CssBox)>>,
+    /// Whether elements outside the clip rectangle are skipped. Off for the walk that fills
+    /// `located`, which also finds the elements that are out of view.
+    cull: bool,
 }
 
 impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
@@ -179,6 +182,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             selection_ranges,
             custom_widget_scenes,
             located: OnceCell::new(),
+            cull: true,
         }
     }
 
@@ -298,9 +302,10 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         }
     }
 
-    /// Where every element that this paint reaches lands: its transform and boxes at the
-    /// moment it is handed to the painter. Worked out once, by walking the document the way
-    /// the default painter does, without drawing.
+    /// Where every element lands, in view or not: its transform and boxes as they are (or
+    /// would be) when it is handed to the painter. Worked out once, by walking the document
+    /// the way the default painter does, without drawing and without skipping what is out
+    /// of view.
     fn located(&self) -> &HashMap<NodeId, (Affine, CssBox)> {
         self.located.get_or_init(|| {
             struct Locate(RefCell<HashMap<NodeId, (Affine, CssBox)>>);
@@ -318,7 +323,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
             // The same walk, on its own painter: nothing is shared with the paint in progress
             let no_widget_scenes = CustomWidgetSceneMap::new();
-            let walker = BlitzDomPainter::new(
+            let mut walker = BlitzDomPainter::new(
                 self.dom,
                 self.scale,
                 self.width,
@@ -327,6 +332,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
                 self.initial_y,
                 &no_widget_scenes,
             );
+            walker.cull = false;
             let locate = Locate(RefCell::new(HashMap::new()));
             walker.paint_scene_with(&mut anyrender::NullScenePainter, &locate);
             locate.0.into_inner()
@@ -539,10 +545,11 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // Cull elements that fall entirely outside the current clip rectangle. In addition to
         // the viewport, `clip_rect` is narrowed by any ancestor scrollport (see below), so this
         // also culls elements scrolled out of view inside a clipping/scrolling container.
-        if screen_bbox.x1 < clip_rect.x0
-            || screen_bbox.x0 > clip_rect.x1
-            || screen_bbox.y1 < clip_rect.y0
-            || screen_bbox.y0 > clip_rect.y1
+        if self.cull
+            && (screen_bbox.x1 < clip_rect.x0
+                || screen_bbox.x0 > clip_rect.x1
+                || screen_bbox.y1 < clip_rect.y0
+                || screen_bbox.y0 > clip_rect.y1)
         {
             return None;
         }
@@ -880,9 +887,18 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
     /// [`css_box`](Self::css_box), as its own painter call sees them. For drawing that
     /// depends on other elements, whether or not they have been painted yet.
     ///
-    /// `None` for an element that this paint does not reach (hidden, outside the visible
-    /// area, or not an element). The positions are those of Blitz's own walk; an element
-    /// that a painter leaves out by not calling [`children`](Self::children) is still found.
+    /// An element that is out of view (outside the visible area, or scrolled out of an
+    /// ancestor that clips) is found too, where it would be, although the painter is not
+    /// called for it: a shape that depends on it does not change as it leaves the view.
+    /// `None` for an element that has no place in this paint: hidden (`display: none`,
+    /// `visibility`, `opacity: 0`), under such an element, or not an element. The positions
+    /// are those of Blitz's own walk; an element that a painter leaves out by not calling
+    /// [`children`](Self::children) is still found.
+    ///
+    /// Both are in physical pixels: the box starts at the element's border-box origin and
+    /// the transform takes it to the scene. To take a shape from the other element's CSS
+    /// pixels to this element's: `(transform() * Affine::scale(scale())).inverse() *
+    /// other_transform * Affine::scale(scale())`.
     ///
     /// The first call in a paint walks the document once; later calls look the answer up.
     pub fn locate(&self, node_id: NodeId) -> Option<(Affine, &CssBox)> {

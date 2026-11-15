@@ -483,3 +483,56 @@ fn a_document_that_is_only_read_can_be_painted_again_without_an_element() {
     assert_eq!(pixel(&without_child, (5, 5)), GREEN);
     assert_eq!(pixel(&without_child, (150, 150)), WHITE);
 }
+
+/// An element that is out of view is not painted, but it is still located, where it would
+/// be: what a painter draws from it does not change as it leaves the view. An element that
+/// has no place in the paint is not located.
+#[test]
+fn an_element_out_of_view_is_located_but_not_painted() {
+    struct Seen(RefCell<Vec<String>>);
+    impl<S: PaintScene> ElementPainter<S> for Seen {
+        fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+            if let Some(name) = id(el) {
+                self.0.borrow_mut().push(name.to_string());
+            }
+            if id(el) == Some("here") {
+                let doc = el.document();
+                let find = |sel: &str| {
+                    let node = doc.query_selector(sel).unwrap().unwrap();
+                    el.locate(node)
+                        .map(|(at, boxes)| at.transform_rect_bbox(boxes.border_box))
+                };
+                // below the 200px viewport
+                assert_eq!(find("#below"), Some(Rect::new(0.0, 500.0, 40.0, 530.0)));
+                // scrolled out of an ancestor that clips
+                assert_eq!(find("#clipped"), Some(Rect::new(0.0, 120.0, 40.0, 150.0)));
+                assert_eq!(find("#gone"), None);
+                assert_eq!(find("#under-gone"), None);
+                assert_eq!(find("#invisible"), None);
+            }
+            el.paint(scene);
+        }
+    }
+    let page = r#"<html><body style="margin:0">
+        <div id="here" style="width:20px; height:20px"></div>
+        <div id="scroller" style="height:50px; overflow:hidden">
+            <div style="height:100px"></div>
+            <div id="clipped" style="width:40px; height:30px"></div>
+        </div>
+        <div id="below" style="position:absolute; left:0; top:500px; width:40px; height:30px"></div>
+        <div id="gone" style="display:none"><div id="under-gone"></div></div>
+        <div id="invisible" style="visibility:hidden; width:10px; height:10px"></div>
+    </body></html>"#;
+    let seen = Seen(RefCell::new(Vec::new()));
+    paint_scene_with(
+        &mut NullScenePainter,
+        &mut document(page),
+        1.0,
+        200,
+        200,
+        0,
+        0,
+        &seen,
+    );
+    assert_eq!(*seen.0.borrow(), ["here", "scroller"]);
+}
