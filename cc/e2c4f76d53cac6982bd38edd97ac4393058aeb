@@ -1,0 +1,28 @@
+tests/blitz-tests/tests/hit_overflow_clip.rs
+  s_faae8d19c8b66a::t_eabd5f0df4045b 50
+  s_faae8d19c8b66a::t_b7498110122b5e 17-19
+  s_faae8d19c8b66a::t_39b39acea740d1 1-16,20-49,51-58
+tests/blitz-tests/tests/all.rs
+  s_faae8d19c8b66a::t_b7498110122b5e 36
+packages/blitz-dom/src/node/node.rs
+  s_faae8d19c8b66a::t_39b39acea740d1 1537,1543,1553-1561,1687-1691
+  s_faae8d19c8b66a::t_9dee5050fa7ec6 1692
+  s_faae8d19c8b66a::t_85c36ef6fa0121 1538-1542,1544-1552,1683-1686,1693-1702
+  s_faae8d19c8b66a::t_d2382d955921b7 1703-1704
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cce2c4f76d53cac6982bd38edd97ac4393058aeb",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": null
+    }
+  }
+}
