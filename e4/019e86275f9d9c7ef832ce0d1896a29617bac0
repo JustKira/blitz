@@ -1,0 +1,19 @@
+packages/blitz-paint/src/render.rs
+  s_faae8d19c8b66a::t_7ecbb6611e9d23 893-898
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e4019e86275f9d9c7ef832ce0d1896a29617bac0",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
