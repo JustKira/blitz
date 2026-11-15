@@ -890,10 +890,12 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
     /// An element that is out of view (outside the visible area, or scrolled out of an
     /// ancestor that clips) is found too, where it would be, although the painter is not
     /// called for it: a shape that depends on it does not change as it leaves the view.
-    /// `None` for an element that has no place in this paint: hidden (`display: none`,
-    /// `visibility`, `opacity: 0`), under such an element, or not an element. The positions
-    /// are those of Blitz's own walk; an element that a painter leaves out by not calling
-    /// [`children`](Self::children) is still found.
+    /// `None` for an element that Blitz would not paint wherever it was: hidden
+    /// (`display: none`, `visibility`, `opacity: 0`), or not an element. This follows the
+    /// paint exactly, so an element that Blitz paints is found: at present that includes an
+    /// absolutely positioned or fixed descendant of an `opacity: 0` element, which is painted
+    /// by its containing block. The positions are those of Blitz's own walk; an element that
+    /// a painter leaves out by not calling [`children`](Self::children) is still found.
     ///
     /// Both are in physical pixels: the box starts at the element's border-box origin and
     /// the transform takes it to the scene. To take a shape from the other element's CSS
