@@ -1,0 +1,21 @@
+packages/blitz-paint/src/render.rs
+  s_faae8d19c8b66a::t_596c361b3f2724 1101-1111,1316-1318
+tests/blitz-tests/tests/paint_traversal.rs
+  s_faae8d19c8b66a::t_bffa78006d345b 539-601
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "378f3c6a459817f4ab083cb01968747c49ab576c",
+  "prompts": {},
+  "sessions": {
+    "s_faae8d19c8b66a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "188d592c-7ed3-4e74-be60-99f487f25f21",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
