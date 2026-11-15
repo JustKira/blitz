@@ -1,0 +1,32 @@
+packages/blitz-dom/src/layout/paint_tree.rs
+  s_1786129173026c::t_f60aca2977597b 619,646,708
+  s_1786129173026c::t_6823a574868109 622-623
+  s_1786129173026c::t_26a1556b1ad919 168,558-560,563-580,624-629,648-656,658-666,682,696-700,703-707,709-715
+packages/blitz-paint/src/render.rs
+  s_1786129173026c::t_6823a574868109 274,426,441-442,474,477,501,511-513
+  s_1786129173026c::t_549d0d5fba9b71 143,172-173,189,264-273,427,434-440,444-457,472-473,475-476,482-487,502-510,514-517,547,613-617,715,760,779-796,804-806,846-871,882-890,907,918,1345,1360,1382,1394
+packages/blitz-dom/src/document.rs
+  s_1786129173026c::t_54c725a245c995 1732-1733
+packages/blitz-dom/src/node/node.rs
+  s_1786129173026c::t_c6171bf75b9665 1443-1458,1540-1544,1591,1609-1611,1626
+packages/blitz-dom/src/tree.rs
+  s_1786129173026c::t_db0f900c30e9ea 3-4,43-46,57
+tests/blitz-tests/tests/paint_oof_stacking_context.rs
+  s_1786129173026c::t_5b4bad1c16bdca 27-30,32,204-289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4f0692d1c63c5078a4be95c72d97b3d95028dfce",
+  "prompts": {},
+  "sessions": {
+    "s_1786129173026c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1dedc-50e0-7702-9c63-e3766f6fdfb5",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
