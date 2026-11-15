@@ -33,6 +33,7 @@ mod fragment_navigation;
 mod harness_smoke;
 mod hidden_checkbox_input;
 mod hit_inline_embedded_box;
+mod hit_overflow_clip;
 mod hit_test_dropped_nodes;
 mod hover_dom_ancestors;
 mod incremental_oracle;
