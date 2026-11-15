@@ -5,8 +5,8 @@ use anyrender_vello_cpu::VelloCpuImageRenderer;
 use blitz_dom::{BaseDocument, DocumentConfig, local_name};
 use blitz_html::{HtmlDocument, HtmlProvider};
 use blitz_paint::{
-    DefaultPainter, ElementPaint, ElementPainter, Piece, paint_scene, paint_scene_with,
-    walk_elements,
+    DefaultPainter, ElementPaint, ElementPainter, Piece, paint_elements, paint_scene,
+    paint_scene_with,
 };
 use blitz_traits::shell::{ColorScheme, Viewport};
 use kurbo::{Circle, Point, Rect};
@@ -348,9 +348,9 @@ fn a_walk_into_no_scene_collects_positions() {
     let mut doc = document(&page);
     paint_scene_with(&mut NullScenePainter, &mut doc, 1.0, 200, 200, 0, 0, &found);
 
-    // `walk_elements` is the same walk, for a document that is only read
+    // `paint_elements` is the same walk, for a document that is only read
     let walked = Collect(RefCell::new(Vec::new()));
-    walk_elements(&doc, 1.0, 200, 200, 0, 0, &walked);
+    paint_elements(&mut NullScenePainter, &doc, 1.0, 200, 200, 0, 0, &walked);
     assert_eq!(*walked.0.borrow(), *found.0.borrow());
     assert_eq!(
         *found.0.borrow(),
@@ -383,7 +383,16 @@ fn a_hoisted_descendant_is_not_one_of_its_parents_paint_children() {
         </div>
     </body></html>"#;
     let seen = SkipCard(RefCell::new(Vec::new()));
-    walk_elements(&document(page), 1.0, 200, 200, 0, 0, &seen);
+    paint_elements(
+        &mut NullScenePainter,
+        &document(page),
+        1.0,
+        200,
+        200,
+        0,
+        0,
+        &seen,
+    );
     assert_eq!(*seen.0.borrow(), ["card", "badge"]);
 }
 
@@ -442,4 +451,35 @@ fn a_painter_is_told_that_the_renderer_dropped_its_resources() {
 
     let nothing: &dyn ElementPainter<NullScenePainter> = &DefaultPainter;
     nothing.renderer_suspended();
+}
+
+/// A painter can paint the page a second time while it is being painted, into a scene of its
+/// own, leaving an element out: the picture of what is behind that element.
+#[test]
+fn a_document_that_is_only_read_can_be_painted_again_without_an_element() {
+    let doc = document(PAGE);
+    let without_child = render_to_buffer::<VelloCpuImageRenderer, _>(
+        |scene| {
+            paint_elements(
+                scene,
+                &doc,
+                1.0,
+                200,
+                200,
+                0,
+                0,
+                &|el: &mut ElementPaint<'_, _>, scene: &mut _| {
+                    if id(el) != Some("child") {
+                        el.paint(scene);
+                    }
+                },
+            )
+        },
+        200,
+        200,
+    );
+    // where the black child was, the blue box shows; the rest is as usual
+    assert_eq!(pixel(&without_child, (30, 30)), BLUE);
+    assert_eq!(pixel(&without_child, (5, 5)), GREEN);
+    assert_eq!(pixel(&without_child, (150, 150)), WHITE);
 }

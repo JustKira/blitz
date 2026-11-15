@@ -73,7 +73,7 @@ pub fn paint_scene(
 ///
 /// Sub-documents (iframes) are painted the default way. Custom widgets are asked to paint
 /// before the walk, whatever the painter does; to find out where elements are without that,
-/// use [`walk_elements`].
+/// use [`paint_elements`].
 ///
 /// If the painter panics, layers it was called inside are left open: discard the scene.
 #[allow(clippy::too_many_arguments)]
@@ -180,24 +180,24 @@ fn process_custom_widget_node(
     Some(widget_scene)
 }
 
-/// Walk the document as [`paint_scene_with`] does, drawing nothing: `visitor` is called for
-/// every element a paint with the same arguments would reach, with the same transforms.
+/// Like [`paint_scene_with`], for a document that is only read: custom widgets are not asked
+/// to paint and are left out of the picture.
 ///
-/// For finding out where elements are before painting them. Nothing is drawn, the document
-/// is not changed and custom widgets are not asked to paint. The visitor goes on to an
-/// element's children the way a painter does, so that scrolling is applied:
-///
-/// ```ignore
-/// el.with_content_clip(scene, |el, scene| el.children(scene));
-/// ```
-pub fn walk_elements(
+/// This can be called while the document is being painted, from inside a painter, with
+/// [`ElementPaint::document`]: to paint the page a second time into a scene of the app's own
+/// (for example everything but one element, as the input of an effect on that element), or,
+/// with a scene that draws nothing such as `anyrender::NullScenePainter`, to find out where
+/// elements are.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_elements<S: PaintScene>(
+    scene: &mut S,
     doc: &BaseDocument,
     scale: f64,
     width: u32,
     height: u32,
     x_offset: u32,
     y_offset: u32,
-    visitor: &dyn ElementPainter<anyrender::NullScenePainter>,
+    painter: &dyn ElementPainter<S>,
 ) {
     let no_widget_scenes = CustomWidgetSceneMap::new();
     let generator = BlitzDomPainter::new(
@@ -209,5 +209,5 @@ pub fn walk_elements(
         y_offset as f64,
         &no_widget_scenes,
     );
-    generator.paint_scene_with(&mut anyrender::NullScenePainter, visitor);
+    generator.paint_scene_with(scene, painter);
 }
