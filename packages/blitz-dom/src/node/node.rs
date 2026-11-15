@@ -42,6 +42,13 @@ use thin_vec::ThinVec;
 use super::stylo_data::{ComputedStyleRef, StyloData};
 use super::{Attribute, DocumentData, ElementData, LayoutData};
 
+/// Overflow clips whose padding box excludes the hit point. Reparented paint
+/// descendants can escape them, so carry them to the boxes actually being hit.
+struct HitOverflowClip<'a> {
+    node_id: NodeId,
+    parent: Option<&'a HitOverflowClip<'a>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayOuter {
     Block,
@@ -60,6 +67,9 @@ bitflags! {
         const IS_IN_DOCUMENT = 0b00000100;
         /// Whether the node is an inline box whose in-flow content is block-level only
         const IS_INLINE_WITH_ONLY_BLOCK_CHILDREN = 0b00001000;
+        /// Paint subtree contains an out-of-flow box captured by a stacking
+        /// context below its containing block. Set by paint-tree construction.
+        const HAS_REPARENTED_OOF_PAINT = 0b00010000;
     }
 }
 
@@ -80,10 +90,16 @@ impl NodeFlags {
     }
 
     #[inline(always)]
+    pub fn has_reparented_oof_paint(&self) -> bool {
+        self.contains(Self::HAS_REPARENTED_OOF_PAINT)
+    }
+
+    #[inline(always)]
     pub fn reset_construction_flags(&mut self) {
         self.remove(Self::IS_INLINE_ROOT);
         self.remove(Self::IS_TABLE_ROOT);
         self.remove(Self::IS_INLINE_WITH_ONLY_BLOCK_CHILDREN);
+        self.remove(Self::HAS_REPARENTED_OOF_PAINT);
     }
 }
 
@@ -1432,6 +1448,23 @@ impl Node {
         scale: f64,
         scrollbar: &mut Option<crate::node::ScrollbarRef>,
     ) -> Option<HitResult> {
+        // Select layout-only bounds once for an ordinary paint subtree. Its
+        // recursive descent then retains the pre-reparenting hit-test path.
+        if self.flags.has_reparented_oof_paint() {
+            self.hit_inner_impl::<true>(x, y, scale, scrollbar, None)
+        } else {
+            self.hit_inner_impl::<false>(x, y, scale, scrollbar, None)
+        }
+    }
+
+    fn hit_inner_impl<const REPARENTED: bool>(
+        &self,
+        x: f32,
+        y: f32,
+        scale: f64,
+        scrollbar: &mut Option<crate::node::ScrollbarRef>,
+        overflow_clips: Option<&HitOverflowClip<'_>>,
+    ) -> Option<HitResult> {
         use style::computed_values::pointer_events::T as PointerEvents;
         use style::computed_values::visibility::T as Visibility;
 
@@ -1445,11 +1478,32 @@ impl Node {
             }
         }
 
+        let clipped_by_ancestor = REPARENTED && {
+            let mut clip = overflow_clips;
+            let mut clipped = false;
+            while let Some(current_clip) = clip {
+                let mut ancestor = self.containing_block();
+                while let Some(id) = ancestor {
+                    if id == current_clip.node_id {
+                        clipped = true;
+                        break;
+                    }
+                    ancestor = self.tree()[id].containing_block();
+                }
+                if clipped {
+                    break;
+                }
+                clip = current_clip.parent;
+            }
+            clipped
+        };
+
         // pointer-events:none makes this element transparent to hits, but its
         // descendants are still tested (one may restore pointer-events:auto).
-        let pointer_events_none = self
-            .primary_styles()
-            .is_some_and(|style| style.clone_pointer_events() == PointerEvents::None);
+        let pointer_events_none = clipped_by_ancestor
+            || self
+                .primary_styles()
+                .is_some_and(|style| style.clone_pointer_events() == PointerEvents::None);
 
         let mut x = x - self.final_layout().location.x + self.scroll_offset().x as f32;
         let mut y = y - self.final_layout().location.y + self.scroll_offset().y as f32;
@@ -1512,7 +1566,11 @@ impl Node {
 
         // `scrollable_overflow` is stored in device (scaled) pixels, whereas the
         // coordinates here are in CSS pixels, so unscale it before comparing.
-        let overflow = *self.scrollable_overflow();
+        let overflow = if REPARENTED {
+            self.paint_bounds(scale)
+        } else {
+            *self.scrollable_overflow()
+        };
 
         let matches_overflow = x >= (overflow.x0 / scale) as f32
             && x <= (overflow.x1 / scale) as f32
@@ -1526,6 +1584,7 @@ impl Node {
         // Descendants overwrite, so the innermost scroll container's thumb
         // wins. Thumb coords are border-box relative (unscrolled).
         if matches_self
+            && !clipped_by_ancestor
             && let Some(sb) = self.scrollbar_at_local(
                 (x - self.scroll_offset().x as f32) as f64,
                 (y - self.scroll_offset().y as f32) as f64,
@@ -1539,6 +1598,7 @@ impl Node {
         // is not painted, so it is not hit either. (`overflow: clip` can clip
         // one axis and leave the other visible.)
         let (clips_x, clips_y) = self.clips_overflow();
+        let mut clips_contents = false;
         if clips_x || clips_y {
             let layout = self.final_layout();
             let local_x = x - self.scroll_offset().x as f32;
@@ -1549,7 +1609,8 @@ impl Node {
             let clipped_y = clips_y
                 && (local_y < layout.border.top
                     || local_y > layout.size.height - layout.border.bottom);
-            if clipped_x || clipped_y {
+            clips_contents = clipped_x || clipped_y;
+            if clips_contents && (!REPARENTED || !self.flags.has_reparented_oof_paint()) {
                 return (matches_self && !pointer_events_none).then_some(HitResult {
                     node_id: self.id,
                     x,
@@ -1558,6 +1619,16 @@ impl Node {
                 });
             }
         }
+
+        let clip = HitOverflowClip {
+            node_id: self.id,
+            parent: overflow_clips,
+        };
+        let overflow_clips = if REPARENTED && clips_contents {
+            Some(&clip)
+        } else {
+            overflow_clips
+        };
 
         // Text clusters and callers of the returned coordinates work in the
         // inline root's content box, but embedded boxes store border-box
@@ -1584,7 +1655,9 @@ impl Node {
                     let pos = hoisted_child.position(self.tree(), self.id);
                     let x = x - pos.x;
                     let y = y - pos.y;
-                    if let Some(hit) = child.hit_inner(x, y, scale, scrollbar) {
+                    if let Some(hit) =
+                        child.hit_inner_impl::<REPARENTED>(x, y, scale, scrollbar, overflow_clips)
+                    {
                         return Some(hit);
                     }
                 }
@@ -1596,26 +1669,19 @@ impl Node {
             let Some(child) = self.tree().get(*child_id) else {
                 continue;
             };
-            let child_position = child.taffy_position();
             let mut child_x = x;
             let mut child_y = y;
-            if child_position.is_out_of_flow() {
-                // Fixed-position children of the root element are positioned
-                // against the viewport and do not scroll with it. (A fixed box
-                // whose containing block is a transformed ancestor scrolls with
-                // that ancestor like any other out-of-flow box.)
-                if child_position == taffy::Position::Fixed && self.containing_block().is_none() {
-                    child_x -= self.scroll_offset().x as f32;
-                    child_y -= self.scroll_offset().y as f32;
-                    let viewport_scroll = self.tree().viewport_scroll();
-                    child_x -= viewport_scroll.x as f32;
-                    child_y -= viewport_scroll.y as f32;
-                }
-            } else if let Some(offset) = child.lifted_paint_offset(self.id) {
+            if let Some(offset) = child.lifted_paint_offset(self.id) {
                 child_x -= offset.x;
                 child_y -= offset.y;
             }
-            if let Some(hit) = child.hit_inner(child_x, child_y, scale, scrollbar) {
+            if let Some(hit) = child.hit_inner_impl::<REPARENTED>(
+                child_x,
+                child_y,
+                scale,
+                scrollbar,
+                overflow_clips,
+            ) {
                 return Some(hit);
             }
         }
@@ -1630,7 +1696,9 @@ impl Node {
                     let pos = hoisted_child.position(self.tree(), self.id);
                     let x = x - pos.x;
                     let y = y - pos.y;
-                    if let Some(hit) = child.hit_inner(x, y, scale, scrollbar) {
+                    if let Some(hit) =
+                        child.hit_inner_impl::<REPARENTED>(x, y, scale, scrollbar, overflow_clips)
+                    {
                         return Some(hit);
                     }
                 }
@@ -1638,7 +1706,8 @@ impl Node {
         }
 
         // Inline children
-        if self.flags.is_inline_root() {
+        if (!REPARENTED || (!clipped_by_ancestor && !clips_contents)) && self.flags.is_inline_root()
+        {
             let x = x - content_box_offset.x;
             let y = y - content_box_offset.y;
             let element_data = &self.element_data().unwrap();

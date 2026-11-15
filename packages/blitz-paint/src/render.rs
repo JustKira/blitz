@@ -6,7 +6,7 @@ mod form_controls;
 mod mask;
 
 use blitz_dom::CopyStyleGetters;
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -55,6 +55,14 @@ use taffy::Layout;
 /// compositing would erase the backdrop behind the element rather than just the
 /// element's own content.
 pub(super) const ALMOST_OPAQUE: f32 = 1.0 - f32::EPSILON;
+
+struct OverflowClip {
+    node_id: NodeId,
+    path: kurbo::BezPath,
+    transform: Affine,
+    screen_bbox: Rect,
+    applied: Cell<bool>,
+}
 
 /// A view of the track positions reported by taffy in physical (left-to-right /
 /// top-to-bottom) order. Taffy reports tracks in logical order, which for RTL grid
@@ -132,6 +140,9 @@ pub struct BlitzDomPainter<'dom, 'a> {
     pub(crate) layer_manager: LayerManager,
     /// Reusable scratch allocations shared by all text layouts painted for this document.
     pub(crate) draw_text_context: RefCell<DrawTextContext>,
+    has_reparented_oof_paint: bool,
+    overflow_clips: RefCell<Vec<OverflowClip>>,
+    escapes_clip_cache: RefCell<HashMap<(NodeId, NodeId), bool>>,
     /// Cached selection ranges for O(1) lookup: node_id -> (start_offset, end_offset)
     pub(crate) selection_ranges: HashMap<NodeId, (usize, usize)>,
 
@@ -164,6 +175,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         let layer_manager = LayerManager::default();
         let root_element_id = dom.try_root_element().map(|el| el.id);
+        let has_reparented_oof_paint = root_element_id
+            .is_some_and(|id| dom.as_ref().tree()[id].flags.has_reparented_oof_paint());
 
         Self {
             dom,
@@ -179,6 +192,9 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             scrollbar_drag_target: dom.scrollbar_drag_target(),
             layer_manager,
             draw_text_context: RefCell::new(DrawTextContext::default()),
+            has_reparented_oof_paint,
+            overflow_clips: RefCell::new(Vec::new()),
+            escapes_clip_cache: RefCell::new(HashMap::new()),
             selection_ranges,
             custom_widget_scenes,
             located: OnceCell::new(),
@@ -258,16 +274,17 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // scrollports narrow this rectangle further for their descendants.
         let viewport_clip_rect = Rect::new(0.0, 0.0, self.width as f64, self.height as f64);
 
-        self.render_element(
-            scene,
-            root_id,
-            Affine::translate(Vec2 {
-                x: self.initial_x - (viewport_scroll.x * self.scale),
-                y: self.initial_y - (viewport_scroll.y * self.scale),
-            }),
-            viewport_clip_rect,
-            painter,
-        );
+        let transform = Affine::translate(Vec2 {
+            x: self.initial_x - (viewport_scroll.x * self.scale),
+            y: self.initial_y - (viewport_scroll.y * self.scale),
+        });
+        // Specialize the ordinary walk so it never scans for escaping boxes or applies
+        // deferred clips. The public painter remains independent of that specialization.
+        if self.has_reparented_oof_paint {
+            self.render_element::<true, S>(scene, root_id, transform, viewport_clip_rect, painter);
+        } else {
+            self.render_element::<false, S>(scene, root_id, transform, viewport_clip_rect, painter);
+        }
 
         // Render debug overlay
         if self.dom.devtools().highlight_hover {
@@ -456,7 +473,8 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
     ///
     /// Approaching rendering this way guarantees we have all the styles we need when rendering text with not having
     /// to traverse back to the parent for its styles, or needing to pass down styles
-    fn render_element<S: PaintScene>(
+    #[inline]
+    fn render_element<const REPARENTED: bool, S: PaintScene>(
         &self,
         scene: &mut S,
         node_id: NodeId,
@@ -464,16 +482,114 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         clip_rect: Rect,
         painter: &dyn ElementPainter<S>,
     ) {
-        if let Some(mut el) =
-            self.begin_element(node_id, parent_style_transform, clip_rect, painter)
-        {
-            painter.paint_element(&mut el, scene);
+        self.with_overflow_clips::<REPARENTED, S>(
+            scene,
+            &self.dom.as_ref().tree()[node_id],
+            true,
+            clip_rect,
+            |scene, clip_rect| {
+                if let Some(mut el) = self.begin_element::<REPARENTED, S>(
+                    node_id,
+                    parent_style_transform,
+                    clip_rect,
+                    painter,
+                ) {
+                    painter.paint_element(&mut el, scene);
+                }
+            },
+        );
+    }
+
+    fn is_inside_clip(&self, node: &Node, clip_id: NodeId) -> bool {
+        let mut current = node.containing_block();
+        while let Some(id) = current {
+            if id == clip_id {
+                return true;
+            }
+            current = self.dom.as_ref().tree()[id].containing_block();
+        }
+        false
+    }
+
+    fn subtree_escapes_clip(&self, node: &Node, clip_id: NodeId) -> bool {
+        if !self.is_inside_clip(node, clip_id) {
+            return true;
+        }
+        if !node.flags.has_reparented_oof_paint() {
+            return false;
+        }
+        let key = (node.id, clip_id);
+        if let Some(&escapes) = self.escapes_clip_cache.borrow().get(&key) {
+            return escapes;
+        }
+        let escapes = node
+            .paint_children
+            .borrow()
+            .iter()
+            .flatten()
+            .any(|id| self.subtree_escapes_clip(&self.dom.as_ref().tree()[*id], clip_id))
+            || node.stacking_context.as_ref().is_some_and(|sc| {
+                sc.children.iter().any(|child| {
+                    self.subtree_escapes_clip(&self.dom.as_ref().tree()[child.node_id], clip_id)
+                })
+            });
+        self.escapes_clip_cache.borrow_mut().insert(key, escapes);
+        escapes
+    }
+
+    /// Overflow clips follow positioning ancestry, unlike atomic effects.
+    /// Apply a clip around a whole subtree when possible. If an out-of-flow
+    /// descendant escapes it, defer the clip to the affected boxes' own paint
+    /// operations, keeping the descendant inside opacity/filter layers.
+    #[inline]
+    fn with_overflow_clips<const REPARENTED: bool, S: PaintScene>(
+        &self,
+        scene: &mut S,
+        node: &Node,
+        subtree: bool,
+        clip_rect: Rect,
+        paint: impl FnOnce(&mut S, Rect),
+    ) {
+        if !REPARENTED || self.overflow_clips.borrow().is_empty() {
+            paint(scene, clip_rect);
+            return;
+        }
+        self.with_overflow_clips_inner(scene, node, subtree, clip_rect, paint);
+    }
+
+    fn with_overflow_clips_inner<S: PaintScene>(
+        &self,
+        scene: &mut S,
+        node: &Node,
+        subtree: bool,
+        mut clip_rect: Rect,
+        paint: impl FnOnce(&mut S, Rect),
+    ) {
+        let mut applied = Vec::new();
+        for (index, clip) in self.overflow_clips.borrow().iter().enumerate() {
+            if !clip.applied.get()
+                && if subtree {
+                    !self.subtree_escapes_clip(node, clip.node_id)
+                } else {
+                    node.id == clip.node_id || self.is_inside_clip(node, clip.node_id)
+                }
+            {
+                scene.push_clip_layer(Fill::NonZero, clip.transform, &clip.path);
+                clip.applied.set(true);
+                clip_rect = clip_rect.intersect(clip.screen_bbox);
+                applied.push(index);
+            }
+        }
+        paint(scene, clip_rect);
+        for index in applied.into_iter().rev() {
+            scene.pop_layer();
+            self.overflow_clips.borrow()[index].applied.set(false);
         }
     }
 
     /// Work out everything that painting `node_id` needs. `None` if the element is not
     /// painted at all: hidden, fully transparent, or outside the clip rectangle.
-    fn begin_element<'s, S: PaintScene>(
+    fn begin_element<'s, const REPARENTED: bool, S: PaintScene>(
         &'s self,
         node_id: NodeId,
         parent_style_transform: Affine,
@@ -534,7 +650,11 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         };
 
         // Don't render things that are out of view
-        let overflow = *node.scrollable_overflow();
+        let overflow = if REPARENTED {
+            node.scrolled_paint_bounds(self.scale)
+        } else {
+            *node.scrollable_overflow()
+        };
         let transform = self.node_transform(node, parent_style_transform);
         let screen_transform = Affine::translate(Vec2 {
             x: -self.initial_x,
@@ -573,8 +693,7 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
 
         // Optimise zero-area (/very small area) clips by not rendering at all
         let clip_area = content_box_size.width * content_box_size.height;
-        let overflow_area =
-            node.scrollable_overflow().width() * node.scrollable_overflow().height();
+        let overflow_area = overflow.width() * overflow.height();
         if should_clip && clip_area < 0.01 && overflow_area < 0.01 {
             return None;
         }
@@ -587,21 +706,6 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         // Apply CSS transform property (where transforms are 2d)
 
         let cx = self.element_cx(node, *node.final_layout(), transform, custom_widget_scene);
-
-        // If this element clips its overflow it establishes a scrollport: narrow the clip
-        // rectangle passed to descendants to the visible (clipped) region so that content
-        // scrolled out of view is culled rather than drawn and clipped away. The box used
-        // here matches the clip applied to the content below.
-        let child_clip_rect = if should_clip {
-            let clip_box = if is_text_input {
-                cx.frame.text_input_clip_path()
-            } else {
-                cx.frame.padding_box_path()
-            };
-            clip_rect.intersect(screen_transform.transform_rect_bbox(clip_box.bounding_box()))
-        } else {
-            clip_rect
-        };
 
         // Compute clip-path (if any). All rendering inside the box layers is wrapped in it.
         let clip_path = cx.clip_path_shape().map(|mut path| {
@@ -623,13 +727,15 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
             should_clip,
             is_text_input,
             content_position,
-            child_clip_rect,
+            clip_rect,
+            child_clip_rect: clip_rect,
+            overflow,
             clip_path,
             css_clip_rect,
         })
     }
 
-    fn render_node<S: PaintScene>(
+    fn render_node<const REPARENTED: bool, S: PaintScene>(
         &self,
         scene: &mut S,
         node_id: NodeId,
@@ -640,9 +746,14 @@ impl<'dom, 'a> BlitzDomPainter<'dom, 'a> {
         let node = &self.dom.as_ref().tree()[node_id];
 
         match &node.data {
-            NodeData::Element(_) | NodeData::AnonymousBlock(_) => {
-                self.render_element(scene, node_id, parent_style_transform, clip_rect, painter)
-            }
+            NodeData::Element(_) | NodeData::AnonymousBlock(_) => self
+                .render_element::<REPARENTED, S>(
+                    scene,
+                    node_id,
+                    parent_style_transform,
+                    clip_rect,
+                    painter,
+                ),
             NodeData::Text(TextNodeData { .. }) => {
                 // Text nodes should never be rendered directly
                 // (they should always be rendered as part of an inline layout)
@@ -851,7 +962,9 @@ pub struct ElementPaint<'p, S: PaintScene> {
     should_clip: bool,
     is_text_input: bool,
     content_position: Point,
+    clip_rect: Rect,
     child_clip_rect: Rect,
+    overflow: Rect,
     clip_path: Option<kurbo::BezPath>,
     css_clip_rect: Option<Rect>,
 }
@@ -892,10 +1005,9 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
     /// called for it: a shape that depends on it does not change as it leaves the view.
     /// `None` for an element that Blitz would not paint wherever it was: hidden
     /// (`display: none`, `visibility`, `opacity: 0`), or not an element. This follows the
-    /// paint exactly, so an element that Blitz paints is found: at present that includes an
-    /// absolutely positioned or fixed descendant of an `opacity: 0` element, which is painted
-    /// by its containing block. The positions are those of Blitz's own walk; an element that
-    /// a painter leaves out by not calling [`children`](Self::children) is still found.
+    /// paint exactly, so an element that Blitz paints is found. The positions are those of
+    /// Blitz's own walk; an element that a painter leaves out by not calling
+    /// [`children`](Self::children) is still found.
     ///
     /// Both are in physical pixels: the box starts at the element's border-box origin and
     /// the transform takes it to the scene. To take a shape from the other element's CSS
@@ -941,20 +1053,64 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
     ) {
         let each = &mut paint_piece;
         self.with_box_layers(scene, |el, scene| {
-            each(el, scene, Piece::Outline);
-            each(el, scene, Piece::OuterShadow);
+            el.with_piece_clips(scene, |el, scene| {
+                each(el, scene, Piece::Outline);
+                each(el, scene, Piece::OuterShadow);
+            });
             el.with_effect_layers(scene, |el, scene| {
-                each(el, scene, Piece::Background);
-                each(el, scene, Piece::InsetShadow);
-                each(el, scene, Piece::TableParts);
-                each(el, scene, Piece::Border);
+                el.with_piece_clips(scene, |el, scene| {
+                    each(el, scene, Piece::Background);
+                    each(el, scene, Piece::InsetShadow);
+                    each(el, scene, Piece::TableParts);
+                    each(el, scene, Piece::Border);
+                });
                 el.with_content_clip(scene, |el, scene| {
-                    each(el, scene, Piece::OwnContent);
+                    el.with_piece_clips(scene, |el, scene| {
+                        each(el, scene, Piece::OwnContent);
+                    });
                     each(el, scene, Piece::Children);
                 });
+                #[cfg(feature = "scrollbars")]
+                el.with_piece_clips(scene, |el, scene| {
+                    each(el, scene, Piece::Scrollbars);
+                });
+                #[cfg(not(feature = "scrollbars"))]
                 each(el, scene, Piece::Scrollbars);
             });
         });
+    }
+
+    // Group adjacent pieces in the default sequence, as in the monolithic painter.
+    // Individual pieces also scope their clips, so omitting or reordering them cannot
+    // leave a layer open. Replacements in paint_with get the same overflow clips.
+    fn with_piece_clips(&mut self, scene: &mut S, paint: impl FnOnce(&mut Self, &mut S)) {
+        let context = self.cx.context;
+        if context.has_reparented_oof_paint {
+            context.with_overflow_clips::<true, S>(
+                scene,
+                self.cx.node,
+                false,
+                self.clip_rect,
+                |scene, _| paint(self, scene),
+            );
+        } else {
+            paint(self, scene);
+        }
+    }
+
+    fn with_own_clips(&self, scene: &mut S, paint: impl FnOnce(&mut S)) {
+        let context = self.cx.context;
+        if context.has_reparented_oof_paint {
+            context.with_overflow_clips::<true, S>(
+                scene,
+                self.cx.node,
+                false,
+                self.clip_rect,
+                |scene, _| paint(scene),
+            );
+        } else {
+            paint(scene);
+        }
     }
 
     /// Paint one piece of the element as Blitz does.
@@ -1019,14 +1175,16 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
 
     /// The outline.
     pub fn outline(&self, scene: &mut S) {
-        self.cx.draw_outline(scene);
+        self.with_own_clips(scene, |scene| self.cx.draw_outline(scene));
     }
 
     /// The outer `box-shadow`.
     pub fn outer_shadow(&self, scene: &mut S) {
-        if self.paints_own_box {
-            self.cx.draw_outset_box_shadow(scene);
-        }
+        self.with_own_clips(scene, |scene| {
+            if self.paints_own_box {
+                self.cx.draw_outset_box_shadow(scene);
+            }
+        });
     }
 
     /// The layers for `clip-path`, `mask`, and `opacity`, `filter` or `backdrop-filter`. The
@@ -1074,13 +1232,15 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
             .unwrap_or(Rect::ZERO);
 
         let mut effect_layer_clip = self.cx.frame.border_box_path().bounding_box();
+        if context.has_reparented_oof_paint && self.cx.node.flags.has_reparented_oof_paint() {
+            effect_layer_clip = effect_layer_clip.union(self.overflow);
+        }
         effect_layer_clip.x0 += filter_expansion_area.x0;
         effect_layer_clip.y0 += filter_expansion_area.y0;
         effect_layer_clip.x1 += filter_expansion_area.x1;
         effect_layer_clip.y1 += filter_expansion_area.y1;
 
         // Opacity/Filter layer if box has opacity or a filter.
-        // Clipped to border-box as it needs to include the background and borders.
         let effect_layer_pushed = context.layer_manager.maybe_push_layer(
             scene,
             opacity < 1.0 || filter.is_some() || backdrop_filter.is_some(),
@@ -1107,30 +1267,38 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
 
     /// The background.
     pub fn background(&self, scene: &mut S) {
-        if self.paints_own_box {
-            self.cx.draw_background(scene);
-        }
+        self.with_own_clips(scene, |scene| {
+            if self.paints_own_box {
+                self.cx.draw_background(scene);
+            }
+        });
     }
 
     /// The inset `box-shadow`.
     pub fn inset_shadow(&self, scene: &mut S) {
-        if self.paints_own_box {
-            self.cx.draw_inset_box_shadow(scene);
-        }
+        self.with_own_clips(scene, |scene| {
+            if self.paints_own_box {
+                self.cx.draw_inset_box_shadow(scene);
+            }
+        });
     }
 
     /// For a table: the backgrounds of its rows and its collapsed borders.
     pub fn table_parts(&self, scene: &mut S) {
-        self.cx.draw_table_row_backgrounds(scene);
-        self.cx.draw_table_borders(scene);
+        self.with_own_clips(scene, |scene| {
+            self.cx.draw_table_row_backgrounds(scene);
+            self.cx.draw_table_borders(scene);
+        });
     }
 
     /// The border.
     pub fn border(&self, scene: &mut S) {
-        if self.paints_own_box {
-            self.cx.draw_border(scene);
-        }
-        self.cx.stroke_devtools(scene);
+        self.with_own_clips(scene, |scene| {
+            if self.paints_own_box {
+                self.cx.draw_border(scene);
+            }
+            self.cx.stroke_devtools(scene);
+        });
     }
 
     /// The clip for `overflow`, and the element's scroll offset. The element's own content
@@ -1145,10 +1313,45 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
             self.cx.frame.padding_box_path()
         };
 
+        let node = self.cx.node;
+        let defer_clip = context.has_reparented_oof_paint
+            && self.should_clip
+            && node.flags.has_reparented_oof_paint()
+            && (node.paint_children.borrow().iter().flatten().any(|id| {
+                context.subtree_escapes_clip(&context.dom.as_ref().tree()[*id], node.id)
+            }) || node.stacking_context.as_ref().is_some_and(|sc| {
+                sc.children.iter().any(|entry| {
+                    context
+                        .subtree_escapes_clip(&context.dom.as_ref().tree()[entry.node_id], node.id)
+                })
+            }));
+        let screen_bbox = if self.should_clip {
+            let screen_transform =
+                Affine::translate((-context.initial_x, -context.initial_y)) * self.cx.transform;
+            screen_transform.transform_rect_bbox(clip.bounding_box())
+        } else {
+            Rect::ZERO
+        };
+        if defer_clip {
+            context.overflow_clips.borrow_mut().push(OverflowClip {
+                node_id: node.id,
+                path: clip.to_path(0.1),
+                transform: self.cx.transform,
+                screen_bbox,
+                applied: Cell::new(false),
+            });
+        }
+        let previous_child_clip_rect = self.child_clip_rect;
+        self.child_clip_rect = if self.should_clip && !defer_clip {
+            self.clip_rect.intersect(screen_bbox)
+        } else {
+            self.clip_rect
+        };
+
         // Clip layer if box requires clipping. Opacity set to 1.0
         let clip_layer_pushed = context.layer_manager.maybe_push_layer(
             scene,
-            self.should_clip,
+            self.should_clip && !defer_clip,
             BlendMode::default(),
             1.0, // opacity
             self.cx.transform,
@@ -1166,41 +1369,60 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
         context
             .layer_manager
             .maybe_pop_layer(scene, clip_layer_pushed);
+        self.child_clip_rect = previous_child_clip_rect;
+        if defer_clip {
+            context.overflow_clips.borrow_mut().pop();
+        }
     }
 
     /// What the element itself shows: an image, SVG, custom widget, sub-document, form
     /// control, text and list marker. Call it inside
     /// [`with_content_clip`](Self::with_content_clip).
     pub fn own_content(&self, scene: &mut S) {
-        let cx = &self.cx;
-        let content_position = Point {
-            x: self.content_position.x - cx.node.scroll_offset().x,
-            y: self.content_position.y - cx.node.scroll_offset().y,
-        };
+        self.with_own_clips(scene, |scene| {
+            let cx = &self.cx;
+            let content_position = Point {
+                x: self.content_position.x - cx.node.scroll_offset().x,
+                y: self.content_position.y - cx.node.scroll_offset().y,
+            };
 
-        cx.draw_image(scene);
-        #[cfg(feature = "svg")]
-        cx.draw_svg(scene);
-        #[cfg(feature = "custom-widget")]
-        cx.draw_custom_widget(scene);
-        cx.draw_sub_document(scene);
-        cx.draw_input(scene);
-        cx.draw_text_input_text(scene, content_position);
-        cx.draw_inline_layout(scene, content_position);
-        cx.draw_marker(scene, content_position);
+            cx.draw_image(scene);
+            #[cfg(feature = "svg")]
+            cx.draw_svg(scene);
+            #[cfg(feature = "custom-widget")]
+            cx.draw_custom_widget(scene);
+            cx.draw_sub_document(scene);
+            cx.draw_input(scene);
+            cx.draw_text_input_text(scene, content_position);
+            cx.draw_inline_layout(scene, content_position);
+            cx.draw_marker(scene, content_position);
+        });
     }
 
     /// The element's children, in paint order, each painted by the same [`ElementPainter`].
     /// Call it inside [`with_content_clip`](Self::with_content_clip).
     pub fn children(&self, scene: &mut S) {
-        self.cx
-            .draw_children(scene, self.cx.transform, self.child_clip_rect, self.painter);
+        if self.cx.context.has_reparented_oof_paint {
+            self.cx.draw_children::<true, S>(
+                scene,
+                self.cx.transform,
+                self.child_clip_rect,
+                self.painter,
+            );
+        } else {
+            self.cx.draw_children::<false, S>(
+                scene,
+                self.cx.transform,
+                self.child_clip_rect,
+                self.painter,
+            );
+        }
     }
 
     /// Overlay scrollbars, drawn unscrolled above the clipped content.
     pub fn scrollbars(&self, scene: &mut S) {
         #[cfg(feature = "scrollbars")]
-        self.cx.draw_scrollbars(scene);
+        self.with_own_clips(scene, |scene| self.cx.draw_scrollbars(scene));
         #[cfg(not(feature = "scrollbars"))]
         let _ = scene;
     }
@@ -1540,7 +1762,7 @@ impl ElementCx<'_, '_> {
         }
     }
 
-    fn draw_children<S: PaintScene>(
+    fn draw_children<const REPARENTED: bool, S: PaintScene>(
         &self,
         scene: &mut S,
         parent_style_transform: Affine,
@@ -1556,7 +1778,7 @@ impl ElementCx<'_, '_> {
                     x: position.x as f64 * self.scale,
                     y: position.y as f64 * self.scale,
                 };
-                self.render_node(
+                self.render_node::<REPARENTED, S>(
                     scene,
                     hoisted_child.node_id,
                     parent_style_transform.pre_translate(pos),
@@ -1569,20 +1791,9 @@ impl ElementCx<'_, '_> {
         // Regular children
         if let Some(children) = &*self.node.paint_children.borrow() {
             for child_id in children {
-                // Fixed-position children of the root element are positioned against
-                // the viewport and do not scroll with it, so cancel out the viewport
-                // scroll (applied in `paint_scene`). A fixed box contained by a
-                // transformed ancestor scrolls with it like any out-of-flow box.
                 let child = &self.context.dom.as_ref().tree()[*child_id];
-                let child_transform = if child.taffy_position() == taffy::Position::Fixed
-                    && Some(self.node.id) == self.context.root_element_id
+                let child_transform = if let Some(offset) = child.lifted_paint_offset(self.node.id)
                 {
-                    let scroll = self.context.dom.as_ref().viewport_scroll();
-                    parent_style_transform.pre_translate(kurbo::Vec2 {
-                        x: scroll.x * self.scale,
-                        y: scroll.y * self.scale,
-                    })
-                } else if let Some(offset) = child.lifted_paint_offset(self.node.id) {
                     parent_style_transform.pre_translate(kurbo::Vec2 {
                         x: offset.x as f64 * self.scale,
                         y: offset.y as f64 * self.scale,
@@ -1590,7 +1801,13 @@ impl ElementCx<'_, '_> {
                 } else {
                     parent_style_transform
                 };
-                self.render_node(scene, *child_id, child_transform, clip_rect, painter);
+                self.render_node::<REPARENTED, S>(
+                    scene,
+                    *child_id,
+                    child_transform,
+                    clip_rect,
+                    painter,
+                );
             }
         }
 
@@ -1602,7 +1819,7 @@ impl ElementCx<'_, '_> {
                     x: position.x as f64 * self.scale,
                     y: position.y as f64 * self.scale,
                 };
-                self.render_node(
+                self.render_node::<REPARENTED, S>(
                     scene,
                     hoisted_child.node_id,
                     parent_style_transform.pre_translate(pos),
