@@ -320,3 +320,46 @@ fn app_page_has_device_pixel_bands_and_clean_square_corners() {
         }
     }
 }
+
+#[test]
+fn negative_spread_preserves_square_radius_axes() {
+    for scale in [1, 2] {
+        for radius in ["0", "0 / 12px", "12px / 0"] {
+            let style = format!("height:80px;border-radius:{radius}");
+            let control = box_pixels(&style, scale);
+            let shadow = box_pixels(
+                &format!("{style};box-shadow:inset 20px 20px 0 -20px white"),
+                scale,
+            );
+            assert!(
+                shadow.data == control.data,
+                "radius {radius}, scale {scale}"
+            );
+        }
+    }
+}
+
+#[test]
+fn elliptical_blur_keeps_an_isotropic_kernel() {
+    for scale in [1, 2] {
+        for radius in ["40px / 8px", "8px / 40px"] {
+            let pixels = box_pixels(
+                &format!("height:80px;border-radius:{radius};box-shadow:inset 0 0 8px 3px white"),
+                scale,
+            );
+            // Samples on the straight edges, away from the corner approximation.
+            // Chrome is 25 at 1x and 22 at 2x at both points. Allow the existing
+            // analytic blur's profile error, but not an axis-stretched kernel.
+            for (x, y) in [(28, 60), (80, 28)] {
+                near(pixels.css(x, y), if scale == 1 { 25 } else { 22 }, 25);
+            }
+        }
+        let unequal = box_pixels(
+            "height:80px;border-radius:55px 10px 25px 3px / 5px 35px 15px 2px;box-shadow:inset 4px -3px 7px 2px white",
+            scale,
+        );
+        // This interior point is black in Chrome. A stretched kernel bleeds
+        // about 62 levels of white into it in the regressed implementation.
+        near(unequal.css(40, 40), 0, 5);
+    }
+}
