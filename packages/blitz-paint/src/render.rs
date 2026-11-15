@@ -1098,7 +1098,17 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
         }
     }
 
-    fn with_own_clips(&self, scene: &mut S, paint: impl FnOnce(&mut S)) {
+    /// Draw something of the app's own for this element, cut by the `overflow` of the boxes
+    /// it is in, as Blitz's own pieces are.
+    ///
+    /// Normally those clips are layers that are already open around the painter's call, and
+    /// this adds nothing. They are not when an absolutely positioned or fixed box escapes
+    /// such a clip while it is painted inside an `opacity` (or other stacking context) that
+    /// the clip also holds: Blitz then applies the clip to each piece separately, and drawing
+    /// of the app's own between the pieces, or directly inside
+    /// [`with_content_clip`](Self::with_content_clip), is not cut unless it is wrapped in this
+    /// call. What [`paint_with`](Self::paint_with) hands to its callback is already inside.
+    pub fn with_own_clips(&self, scene: &mut S, paint: impl FnOnce(&mut S)) {
         let context = self.cx.context;
         if context.has_reparented_oof_paint {
             context.with_overflow_clips::<true, S>(
@@ -1303,6 +1313,9 @@ impl<'p, S: PaintScene> ElementPaint<'p, S> {
 
     /// The clip for `overflow`, and the element's scroll offset. The element's own content
     /// and its children go inside.
+    ///
+    /// Drawing of the app's own made directly inside is cut by this clip, except in the case
+    /// that [`with_own_clips`](Self::with_own_clips) describes: wrap it in that call.
     pub fn with_content_clip(&mut self, scene: &mut S, paint: impl FnOnce(&mut Self, &mut S)) {
         let context = self.cx.context;
 

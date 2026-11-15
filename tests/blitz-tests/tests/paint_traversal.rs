@@ -536,3 +536,66 @@ fn an_element_out_of_view_is_located_but_not_painted() {
     );
     assert_eq!(*seen.0.borrow(), ["here", "scroller"]);
 }
+
+/// An absolutely positioned box that escapes an `overflow` clip while it is painted inside
+/// that box's `opacity` makes Blitz apply the clip piece by piece. Drawing of the app's own
+/// is cut by it when it is made through `paint_with` or wrapped in `with_own_clips`.
+#[test]
+fn own_drawing_is_cut_by_an_overflow_clip_that_a_positioned_box_escapes() {
+    const ESCAPE: &str = r#"<html><body style="margin:0; background:#ffffff">
+        <div id="effect" style="opacity:0.5; overflow:hidden; width:20px; height:20px">
+            <div style="position:absolute; left:50px; top:50px; width:20px; height:20px;
+                background:#ff0000"></div>
+        </div>
+    </body></html>"#;
+    fn mark<S: PaintScene>(el: &ElementPaint<'_, S>, scene: &mut S) {
+        let big = Rect::new(0.0, 0.0, 100.0, 100.0);
+        scene.fill(Fill::NonZero, el.transform(), GREEN_FILL, None, &big);
+    }
+    const GREEN_FILL: Color = Color::from_rgb8(0, 255, 0);
+
+    struct Replace;
+    impl<S: PaintScene> ElementPainter<S> for Replace {
+        fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+            if id(el) != Some("effect") {
+                return el.paint(scene);
+            }
+            el.paint_with(scene, |el, scene, piece| match piece {
+                Piece::OwnContent => mark(el, scene),
+                piece => el.piece(scene, piece),
+            });
+        }
+    }
+    struct ByHand;
+    impl<S: PaintScene> ElementPainter<S> for ByHand {
+        fn paint_element(&self, el: &mut ElementPaint<'_, S>, scene: &mut S) {
+            if id(el) != Some("effect") {
+                return el.paint(scene);
+            }
+            el.with_box_layers(scene, |el, scene| {
+                el.with_effect_layers(scene, |el, scene| {
+                    el.with_content_clip(scene, |el, scene| {
+                        el.with_own_clips(scene, |scene| mark(el, scene));
+                        el.children(scene);
+                    });
+                });
+            });
+        }
+    }
+    for picture in [
+        render(&mut document(ESCAPE), Replace),
+        render(&mut document(ESCAPE), ByHand),
+    ] {
+        assert_eq!(
+            pixel(&picture, (10, 10)),
+            [127, 255, 127],
+            "inside the clip"
+        );
+        assert_eq!(pixel(&picture, (30, 30)), WHITE, "cut by the clip");
+        assert_eq!(
+            pixel(&picture, (55, 55)),
+            [255, 127, 127],
+            "the box that escapes"
+        );
+    }
+}
