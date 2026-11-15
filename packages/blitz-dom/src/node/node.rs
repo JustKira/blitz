@@ -1534,6 +1534,31 @@ impl Node {
             *scrollbar = Some(sb);
         }
 
+        // A box that clips its overflow shows its contents only inside its
+        // padding box: outside of it, along an axis that clips, a descendant
+        // is not painted, so it is not hit either. (`overflow: clip` can clip
+        // one axis and leave the other visible.)
+        let (clips_x, clips_y) = self.clips_overflow();
+        if clips_x || clips_y {
+            let layout = self.final_layout();
+            let local_x = x - self.scroll_offset().x as f32;
+            let local_y = y - self.scroll_offset().y as f32;
+            let clipped_x = clips_x
+                && (local_x < layout.border.left
+                    || local_x > layout.size.width - layout.border.right);
+            let clipped_y = clips_y
+                && (local_y < layout.border.top
+                    || local_y > layout.size.height - layout.border.bottom);
+            if clipped_x || clipped_y {
+                return (matches_self && !pointer_events_none).then_some(HitResult {
+                    node_id: self.id,
+                    x,
+                    y,
+                    is_text: false,
+                });
+            }
+        }
+
         // Text clusters and callers of the returned coordinates work in the
         // inline root's content box, but embedded boxes store border-box
         // relative locations like every other child; apply the offset only
@@ -1653,6 +1678,28 @@ impl Node {
         }
 
         None
+    }
+
+    /// Whether the box clips what overflows it along the x and the y axis: `overflow` other
+    /// than `visible` on an element other than the root, whose `overflow` applies to the
+    /// viewport.
+    fn clips_overflow(&self) -> (bool, bool) {
+        use style::values::computed::Overflow;
+
+        let is_root_element = self
+            .parent
+            .and_then(|id| self.tree().get(id))
+            .is_some_and(|parent| matches!(parent.data, NodeData::Document(_)));
+        if is_root_element {
+            return (false, false);
+        }
+        self.primary_styles().map_or((false, false), |style| {
+            let box_style = style.get_box();
+            (
+                !matches!(box_style.overflow_x, Overflow::Visible),
+                !matches!(box_style.overflow_y, Overflow::Visible),
+            )
+        })
     }
 
     /// Find the inline root ancestor of this node (or self if this is an inline root).
