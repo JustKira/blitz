@@ -1,0 +1,46 @@
+tests/blitz-tests/tests/paint_tree_incremental.rs
+  s_a196e338b787c9::t_0f7e9cd897437a 656-657,659,664
+packages/blitz-dom/src/node/node.rs
+  s_a196e338b787c9::t_b0b8811cb841d7 63-65,85-89,95,135-136,438,1527,1588
+tests/blitz-tests/tests/paint_oof_stacking_context.rs
+  s_a196e338b787c9::t_74b4591060acb6 94,194-198
+  s_a196e338b787c9::t_37f9e3c6c07904 1-74,83-88,90-91,93,96-114,116-133,135-136,138-177,179,182,192,199
+  s_a196e338b787c9::t_46386326520ac8 75-77,80-82
+  s_a196e338b787c9::t_a9248cd413bee4 89
+  s_a196e338b787c9::t_bd57a02670f574 92
+  s_a196e338b787c9::t_a330584a2ffc91 95
+  s_a196e338b787c9::t_0d99903402aa6c 115
+  s_a196e338b787c9::t_90c8945f430262 134
+  s_a196e338b787c9::t_f97584778cefd3 137
+  s_a196e338b787c9::t_36f4b2432ecf72 178
+  s_a196e338b787c9::t_dc32419436b1f0 180-181
+  s_a196e338b787c9::t_e54c17c75e5150 183-185,189-191
+  s_a196e338b787c9::t_3212ff95a7a04d 193
+  s_a196e338b787c9::t_77e0e62566c03c 78-79,186-188
+packages/blitz-dom/src/layout/paint_tree.rs
+  s_a196e338b787c9::t_b0b8811cb841d7 13,30-32,48,58,69-82,168,234,243,296,301-305,317,327-339,348-371,388,428-433,438-443,466-475,477-480,504-510,512-524,535,543,557-561,600-605,611-648,650-652
+  s_a196e338b787c9::t_862fc0ed28bbf2 511
+  s_a196e338b787c9::t_c2b87a156c17b6 649
+packages/blitz-paint/src/render.rs
+  s_a196e338b787c9::t_b0b8811cb841d7 9,59-66,143-144,186-187,428-499,505,565,603,663-668,704-706,708-710,727-738,746-769,771,773,779-809,816-818,1301
+  s_a196e338b787c9::t_e98b9a73624738 500
+  s_a196e338b787c9::t_1dfd02512967fd 501-504,506
+tests/blitz-tests/tests/all.rs
+  s_a196e338b787c9::t_1d7553b16730b2 54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e6f797a430db394001414a7c0bba78f8d105e5ce",
+  "prompts": {},
+  "sessions": {
+    "s_a196e338b787c9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1deb4-dbbb-71b1-8854-78f16045eb12",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
