@@ -1,0 +1,21 @@
+packages/blitz-paint/src/render/box_shadow.rs
+  s_fe62581e474d74::t_17ce1647166d58 122-123,127-132,179-181,372-478
+  s_fe62581e474d74::t_d3c93f2a120bb9 126,133-138,160-178,300-343
+  s_fe62581e474d74::t_4030ed82ff537f 124-125,182-184,186,188-191,344-345,512,514-516,519-521,523
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fdbef08510ab9e09aaf3256a51e057d51d01adb7",
+  "prompts": {},
+  "sessions": {
+    "s_fe62581e474d74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1df3b-656d-7913-8325-d9a56eb95ec8",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "JustKira <shighgamerhg@gmail.com>"
+    }
+  }
+}
